@@ -2,7 +2,7 @@
 // SHU-VPN 主界面（毛玻璃深色 · 自绘标题栏）：
 // 大状态环 + 连接控制 / 日志抽屉 / 设置面板（含开机自启）/ 2FA 与首用引导弹窗。
 // 事件契约见 src-tauri/src/lib.rs 的 UiEvent（vpn-event, tag=kind）。
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,6 +19,9 @@ interface Settings {
   twoFaMethod: string;
   verifyTls: boolean;
   openvpnPath: string | null;
+  hideTray: boolean;
+  splitTunnel: boolean;
+  wallpaper: string | null;
 }
 
 interface StatusInfo {
@@ -29,6 +32,7 @@ interface StatusInfo {
   openvpnPath: string;
   openvpnFound: boolean;
   msiAvailable: boolean;
+  routesLearned: number;
 }
 
 /** 学校官方 shu.ovpn 下载页（README「配置来源」同款地址） */
@@ -58,6 +62,21 @@ const showSettings = ref(false);
 // 开机自启（状态以系统计划任务为唯一事实源，见 lib.rs set_autostart）
 const autostart = ref(false);
 const autostartBusy = ref(false);
+
+// 自定义背景图（后端存应用数据目录，前端以 data URL 应用）
+const wallpaperUrl = ref("");
+const wallInput = ref<HTMLInputElement | null>(null);
+
+/** 有背景图时叠加深色渐变遮罩（保证文字可读），无图时保持默认毛玻璃 */
+const shellStyle = computed(() =>
+  wallpaperUrl.value
+    ? {
+        backgroundImage: `linear-gradient(rgba(13,18,32,0.78), rgba(13,18,32,0.88)), url(${wallpaperUrl.value})`,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }
+    : {},
+);
 
 // 2FA 验证码弹窗
 const showCode = ref(false);
@@ -148,6 +167,11 @@ onMounted(async () => {
   await refreshStatus();
   if (info.value && !info.value.hasCredentials) showCreds.value = true;
   await loadAutostart();
+  try {
+    wallpaperUrl.value = (await invoke<string | null>("get_wallpaper")) ?? "";
+  } catch {
+    wallpaperUrl.value = "";
+  }
 });
 
 onUnmounted(() => {
@@ -302,10 +326,73 @@ async function toggleVerifyTls(): Promise<void> {
   info.value.settings.verifyTls = !info.value.settings.verifyTls;
   await saveSettings();
 }
+
+async function toggleSplitTunnel(): Promise<void> {
+  if (!info.value) return;
+  const next = !info.value.settings.splitTunnel;
+  if (next && info.value.routesLearned === 0) {
+    log("⚠ 分流模式需要先正常连接一次以学习校内网段，本次仍将开启但连接前请先全局连接一次");
+  }
+  info.value.settings.splitTunnel = next;
+  await saveSettings();
+  await refreshStatus();
+}
+
+async function toggleHideTray(): Promise<void> {
+  if (!info.value) return;
+  info.value.settings.hideTray = !info.value.settings.hideTray;
+  await saveSettings();
+  log(
+    info.value.settings.hideTray
+      ? "已隐藏托盘图标：关闭窗口将直接退出应用"
+      : "已恢复托盘图标",
+  );
+}
+
+function pickWallpaper(): void {
+  wallInput.value?.click();
+}
+
+async function onWallFile(e: Event): Promise<void> {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  (e.target as HTMLInputElement).value = ""; // 允许重复选同一文件
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    log("✗ 图片过大（上限 10MB）");
+    return;
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  }).catch(() => "");
+  if (!dataUrl) {
+    log("✗ 读取图片失败");
+    return;
+  }
+  try {
+    await invoke("set_wallpaper", { data: dataUrl });
+    wallpaperUrl.value = dataUrl;
+    log("✓ 背景已更新");
+  } catch (e) {
+    log("✗ 设置背景失败: " + String(e));
+  }
+}
+
+async function clearWallpaper(): Promise<void> {
+  try {
+    await invoke("clear_wallpaper");
+    wallpaperUrl.value = "";
+    log("已恢复默认背景");
+  } catch (e) {
+    log(String(e));
+  }
+}
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :style="shellStyle">
     <!-- 自绘标题栏（无边框窗口）：拖动区 + 窗口控制 -->
     <header class="titlebar" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region>
@@ -490,6 +577,48 @@ async function toggleVerifyTls(): Promise<void> {
             :disabled="autostartBusy"
             @click="toggleAutostart"
           ></button>
+        </div>
+
+        <div class="row">
+          <span>
+            分流模式<small>
+              仅校内网段走 VPN，其余流量直连；切换后需重连生效 · 已学习
+              {{ info?.routesLearned ?? 0 }} 个网段
+            </small>
+          </span>
+          <button
+            class="switch"
+            :class="{ on: info?.settings.splitTunnel }"
+            :disabled="!info"
+            @click="toggleSplitTunnel"
+          ></button>
+        </div>
+
+        <div class="row">
+          <span>隐藏托盘图标<small>隐藏后关闭窗口将直接退出应用</small></span>
+          <button
+            class="switch"
+            :class="{ on: info?.settings.hideTray }"
+            :disabled="!info"
+            @click="toggleHideTray"
+          ></button>
+        </div>
+
+        <div class="field">
+          <label>自定义背景（PNG / JPEG / WebP / GIF，≤10MB）</label>
+          <div class="wall-btns">
+            <button class="ghost wall-btn" @click="pickWallpaper">选择图片</button>
+            <button v-if="wallpaperUrl" class="ghost wall-btn" @click="clearWallpaper">
+              清除
+            </button>
+          </div>
+          <input
+            ref="wallInput"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            style="display: none"
+            @change="onWallFile"
+          />
         </div>
 
         <div class="field">
@@ -1070,5 +1199,21 @@ button {
   color: #93a4c3;
   word-break: break-all;
   line-height: 1.6;
+}
+.wall-btns {
+  display: flex;
+  gap: 8px;
+}
+.wall-btn {
+  border: none;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e9eef7;
+  font-size: 12.5px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.wall-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
 }
 </style>
