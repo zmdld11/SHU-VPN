@@ -22,6 +22,7 @@ interface Settings {
   hideTray: boolean;
   splitTunnel: boolean;
   wallpaper: string | null;
+  hotkey: string | null;
 }
 
 interface StatusInfo {
@@ -132,6 +133,10 @@ onMounted(async () => {
             status.value = "connected";
             errMsg.value = "";
             log("✓ 已连接（Initialization Sequence Completed）");
+          } else if (ev.name === "CONNECTING") {
+            // 托盘/快捷键发起的连接也驱动主窗口动画（见 #9）
+            status.value = "connecting";
+            errMsg.value = "";
           } else if (ev.name === "FAILED") {
             status.value = "failed";
             errMsg.value = ev.reason ?? "连接失败";
@@ -347,6 +352,14 @@ async function toggleHideTray(): Promise<void> {
       ? "已隐藏托盘图标：关闭窗口将直接退出应用"
       : "已恢复托盘图标",
   );
+}
+
+async function saveHotkey(e: Event): Promise<void> {
+  if (!info.value) return;
+  const v = (e.target as HTMLInputElement).value.trim();
+  if ((info.value.settings.hotkey ?? "") === v) return;
+  info.value.settings.hotkey = v === "" ? null : v;
+  await saveSettings(); // 格式非法时后端报错 → refreshStatus 回读放弃
 }
 
 function pickWallpaper(): void {
@@ -618,6 +631,17 @@ async function clearWallpaper(): Promise<void> {
             accept="image/png,image/jpeg,image/webp,image/gif"
             style="display: none"
             @change="onWallFile"
+          />
+        </div>
+
+        <div class="field">
+          <label>全局快捷键（连接 / 断开切换，回车保存；清空关闭）</label>
+          <input
+            class="hk-input"
+            :value="info?.settings.hotkey ?? ''"
+            placeholder="Ctrl+Alt+V"
+            @keyup.enter="saveHotkey($event)"
+            @blur="saveHotkey($event)"
           />
         </div>
 
@@ -1215,5 +1239,19 @@ button {
 }
 .wall-btn:hover {
   background: rgba(255, 255, 255, 0.16);
+}
+.hk-input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid #33415e;
+  background: rgba(0, 0, 0, 0.3);
+  color: #e9eef7;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.hk-input:focus {
+  border-color: #3b82f6;
 }
 </style>
