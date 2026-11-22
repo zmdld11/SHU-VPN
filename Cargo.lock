@@ -2897,7 +2897,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "probe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "rpassword",
@@ -3653,7 +3653,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shu-vpn"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3669,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "shuvpn-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
