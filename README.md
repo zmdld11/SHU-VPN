@@ -59,11 +59,13 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 
 ## 内置 OpenVPN（前置依赖）
 
-发布版安装包内嵌**官方未修改**的 OpenVPN 2.7.8 Windows MSI（amd64）：未检测到
-OpenVPN 社区版时，应用可一键静默安装（约 30-60s，含官方签名的 TAP 驱动）；
-已安装则直接复用本机版本，不重复安装。
+发布版安装包内嵌**官方未修改**的 OpenVPN 2.7.9 Windows MSI（amd64，官方 Authenticode
+签名）：未检测到 OpenVPN 社区版时，应用可一键静默安装（约 30-60s，含官方签名的 TAP
+驱动）；已安装则直接复用本机版本，不重复安装。
 
-- 来源：官方 CDN `swupdate.openvpn.org`（release 流水线取件，安装包内附 SHA256 记录）
+- 来源：官方原包存于仓库的 [vendor-openvpn-2.7.9](https://github.com/zmdld11/SHU-VPN/releases/tag/vendor-openvpn-2.7.9)
+  release（SHA256 指纹锁定在 release 流水线里）；官方 CDN `swupdate.openvpn.org` 作
+  兜底来源
 - 许可合规：OpenVPN 为 GPLv2，许可全文随包分发
   （`src-tauri/resources/OPENVPN-LICENSE-GPLv2.txt`）；TAP 驱动 tap-windows6 为
   GPL-2.0 / MIT 双许可

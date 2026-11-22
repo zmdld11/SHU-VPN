@@ -33,8 +33,10 @@ jobs:
       # OPENVPN_MSI_VERSION 即可。
       - name: Fetch embedded OpenVPN MSI
         env:
-          OPENVPN_MSI_VERSION: "2.7.8"
-          VENDOR_MSI_URL: "https://github.com/zmdld11/SHU-VPN/releases/download/vendor-openvpn-2.7.8/OpenVPN-2.7.8-amd64.msi"
+          OPENVPN_MSI_VERSION: "2.7.9-I002"
+          VENDOR_MSI_URL: "https://github.com/zmdld11/SHU-VPN/releases/download/vendor-openvpn-2.7.9/OpenVPN-2.7.9-I002-amd64.msi"
+          # 官方原包指纹锁定（OpenVPN Inc Authenticode 签名 + 本哈希双重校验）
+          VENDOR_MSI_SHA256: "D050EFADC6CABC4E304EB810DD7FEDFC54B859D34730AB9CDCB22D61EB86AB7A"
         shell: pwsh
         run: |
           $version = $env:OPENVPN_MSI_VERSION
@@ -64,6 +66,9 @@ jobs:
           }
           if (-not $ok) { throw "未能获取 OpenVPN $version MSI：所有来源均失败（检查 vendor release 是否存在 / CDN 状态）" }
           $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+          if ($env:VENDOR_MSI_SHA256 -and $hash -ne $env:VENDOR_MSI_SHA256) {
+            throw "MSI sha256 不匹配：期望 $($env:VENDOR_MSI_SHA256)，实际 $hash（文件可能被替换或损坏，禁止内嵌）"
+          }
           "$hash  openvpn-prereq.msi (OpenVPN $version)" | Out-File -Encoding ascii "src-tauri/resources/openvpn-prereq.msi.sha256"
           Write-Host "Fetched OpenVPN $version MSI, sha256=$hash"
 
