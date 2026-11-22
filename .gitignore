@@ -16,6 +16,7 @@ captures/
 .credentials*
 *session*.json
 cookie*.json
+.probe-*
 .env
 .env.*
 

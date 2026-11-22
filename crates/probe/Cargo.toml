@@ -1,6 +1,6 @@
 [package]
 name = "probe"
-description = "SHU-VPN 联调探测 CLI：真实环境验证协议链路（凭据只进内存）"
+description = "SHU-VPN 联调探测 CLI：真实环境验证协议链路（凭据只进内存/本地未跟踪文件）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,5 @@ path = "src/main.rs"
 [dependencies]
 shuvpn-core = { path = "../shuvpn-core" }
 tokio = { workspace = true }
+serde_json = { workspace = true }
+rpassword = "7"
