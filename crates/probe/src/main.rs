@@ -92,7 +92,7 @@ fn usage(msg: &str) -> ExitCode {
 
 fn print_usage() {
     eprintln!(
-        "用法: shuvpn-probe <login [--from-file <json>] [--method sms|wecom] | verify --code <码> | otp | creds --set [--from-file <json>] | creds --show | creds --clear | connect [--config shu.ovpn]>"
+        "用法: shuvpn-probe <login [--from-file <json>] [--method sms|wecom] | verify --code <码> | otp | creds --set [--from-file <json>] | creds --show | creds --clear | connect [--config <自定义.ovpn>]>\n  connect 缺省使用内置 SHU.ovpn（学校公开配置），无需指定 --config"
     );
 }
 
@@ -406,7 +406,17 @@ async fn cmd_connect(config: Option<String>) -> Result<(), ExitCode> {
         .ok_or_else(|| usage("系统凭据库没有密码——先运行 creds --set"))?;
     let session = load_session()?;
 
-    let cfg_path = config.unwrap_or_else(|| "shu.ovpn".to_string());
+    // 缺省用内置 SHU.ovpn（学校公开配置，写入本地临时文件供 openvpn 读取）
+    let cfg_path = match config {
+        Some(p) => p,
+        None => {
+            std::fs::write(".shu.ovpn", vpn::EMBEDDED_SHU_OVPN).map_err(|e| {
+                eprintln!("✗ 内置配置写入失败: {e}");
+                ExitCode::from(9)
+            })?;
+            ".shu.ovpn".to_string()
+        }
+    };
     let cfg = VpnConfig::new(&cfg_path);
     let auth = Arc::new(ProbeAuth {
         username,
@@ -416,7 +426,11 @@ async fn cmd_connect(config: Option<String>) -> Result<(), ExitCode> {
     });
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VpnEvent>();
-    println!("[*] 启动 openvpn（{}）...", cfg.openvpn_path.display());
+    println!(
+        "[*] 启动 openvpn（{}），配置: {}",
+        cfg.openvpn_path.display(),
+        cfg.config_path.display()
+    );
     let handle: VpnHandle = vpn::launch(&cfg, auth, tx).await.map_err(err_to_code)?;
     println!("  ✓ 进程已启动，接管 management 接口");
 

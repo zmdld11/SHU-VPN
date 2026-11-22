@@ -46,6 +46,17 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 | 桌面 VPN 管理（management 接口） | #5 | ⏳ |
 | UI + v0.1 发布 | #6 | ⏳ |
 
+## 配置来源
+
+仓库内置了学校官方公开分发的连接配置 [`assets/shu.ovpn`](assets/shu.ovpn)（对全体师生相同，
+不含任何个人凭据，内含 CA 证书与服务器列表）。`connect` 缺省使用内置配置，也可用
+`--config` 指定自备配置。
+
+- 官方下载地址（上海大学信息服务门户）：
+  https://vpn.shu.edu.cn/system/_content/download.jsp?urltype=news.DownloadAttachUrl&owner=1400141026&wbfileid=26FE81EE4A989F244CACDE8959CAE3BD
+- 学校系统升级导致内置配置失效时，优先以上方地址为准，用 `--config` 指向新文件；
+  并欢迎提 issue 同步更新内置配置。
+
 ## 开发
 
 前置依赖：Rust (MSVC)、Node.js ≥ 20、WebView2（Win11 自带）、已安装 OpenVPN 社区版。

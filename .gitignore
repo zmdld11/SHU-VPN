@@ -8,8 +8,11 @@ node_modules/
 ui/dist/
 ui/node_modules/
 
-# 敏感产物 —— 严禁入库（ovpn 配置含服务器信息，凭据/会话绝不入库）
+# 敏感产物 —— 严禁入库（凭据/会话绝不入库；ovpn 默认不入库，
+# 但 assets/shu.ovpn 为学校公开分发、对全体用户相同的配置（无任何个人凭据），
+# 经仓库所有者确认后内置，见 README「配置来源」）
 *.ovpn
+!assets/shu.ovpn
 *.pem
 *.key
 captures/

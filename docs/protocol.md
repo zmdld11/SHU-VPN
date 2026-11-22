@@ -181,6 +181,11 @@ period:  const\s+totalSeconds\s*=\s*(\d+)\s*;
 ## 6. OpenVPN 侧
 
 - `shu.ovpn` 使用 **static-challenge**（账密验证后客户端弹出独立验证码输入框）。
+  实测配置（2026-11，内置版见仓库 `assets/shu.ovpn`，官方下载地址见 README）：
+  `static-challenge "Enter OTP Code:" 1` —— flag=1 → ECHO=1、**FORMAT=0**，
+  应答走 `SCRV1:<b64密码>:<b64口令>` 打包格式；另含 `reneg-sec 0`（不重协商，
+  口令只在连接时用一次）、`auth-user-pass`、`setenv CLIENT_CERT 0`（无客户端证书）、
+  `remote-random` 多服务器（含一个占位假地址，失败自动换下一个，属正常现象）。
 - 本项目不弹窗，而是以参数化方式运行社区版 `openvpn.exe`
   （默认 `C:\Program Files\OpenVPN\bin\openvpn.exe`）：
   `--management 127.0.0.1 <随机端口>` + `--auth-retry interact` +

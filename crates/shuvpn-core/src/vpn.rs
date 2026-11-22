@@ -30,6 +30,11 @@ use crate::error::{CoreError, Result};
 /// 社区版 openvpn.exe 默认路径。
 pub const DEFAULT_OPENVPN_PATH: &str = r"C:\Program Files\OpenVPN\bin\openvpn.exe";
 
+/// 内置的 SHU.ovpn（学校官方公开分发的连接配置，对全体用户相同，无任何
+/// 个人凭据；来源与更新地址见 README「配置来源」）。connect 缺省使用它，
+/// 写成临时文件后交给 openvpn；`--config` 仍可指向用户自备配置。
+pub const EMBEDDED_SHU_OVPN: &str = include_str!("../../../assets/shu.ovpn");
+
 /// management 连接等待上限（openvpn 打开端口通常 <1s）。
 const MGMT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
