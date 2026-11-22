@@ -77,7 +77,8 @@ impl ShuSession {
         format!("{}{}", self.config.base.trim_end_matches('/'), path)
     }
 
-    pub(crate) fn http(&self) -> &Client {
+    /// 底层 HTTP 客户端（共享 cookie jar；高级用法/测试用）。
+    pub fn http(&self) -> &Client {
         &self.http
     }
 

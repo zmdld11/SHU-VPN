@@ -10,6 +10,7 @@
 //! - 不做本地 TOTP 推算，口令只从服务端页面读取。
 
 pub mod error;
+pub mod flow;
 pub mod otp;
 pub mod secrets;
 pub mod session;
