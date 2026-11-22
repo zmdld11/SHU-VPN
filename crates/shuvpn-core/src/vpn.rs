@@ -419,6 +419,15 @@ pub async fn launch(
     .stderr(Stdio::piped())
     .kill_on_drop(true);
 
+    // OpenVPN 是控制台程序：从 GUI 进程 spawn 时 Windows 会为它新开一个控制台
+    // 黑窗并驻留到断开。CREATE_NO_WINDOW 抑制窗口（stdio 已是管道，不受影响）。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+
     let mut child = cmd
         .spawn()
         .map_err(|e| CoreError::Protocol(format!("openvpn 启动失败: {e}")))?;
