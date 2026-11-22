@@ -52,6 +52,8 @@ struct Settings {
     split_tunnel: bool,
     /// 自定义背景图文件名（存于应用数据目录，None = 默认毛玻璃）。
     wallpaper: Option<String>,
+    /// 全局快捷键（连接/断开切换），None 或空串 = 不启用。
+    hotkey: Option<String>,
 }
 
 impl Default for Settings {
@@ -63,6 +65,7 @@ impl Default for Settings {
             hide_tray: false,
             split_tunnel: false,
             wallpaper: None,
+            hotkey: Some("Ctrl+Alt+V".into()),
         }
     }
 }
@@ -99,6 +102,9 @@ struct AppState {
     status: Mutex<String>,
     /// 等待中的 2FA 验证码回传通道（前端 submit_2fa_code 填充）。
     code_pending: Arc<AsyncMutex<Option<oneshot::Sender<String>>>>,
+    /// 连接取消标志：SSO/2FA 阶段（handle 尚为 None）请求断开时置位，
+    /// connect_inner 检查点据此中断流程（见 issue #9 卡死修复）。
+    cancel_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 转发给前端的统一事件（`vpn-event`，tag=kind）。
@@ -233,7 +239,18 @@ async fn do_connect(app: AppHandle) -> Result<(), String> {
         }
         *status = "connecting".into();
     }
+    state
+        .cancel_connect
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     update_tray(&app, "connecting");
+    // 托盘/快捷键发起的连接前端无从感知：显式广播，让主窗口状态环立即进入动画
+    emit(
+        &app,
+        UiEvent::State {
+            name: "CONNECTING".into(),
+            reason: None,
+        },
+    );
 
     match connect_inner(&app).await {
         Ok(()) => Ok(()),
@@ -255,6 +272,14 @@ async fn do_connect(app: AppHandle) -> Result<(), String> {
 
 async fn connect_inner(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let cancelled = || {
+        state
+            .cancel_connect
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    if cancelled() {
+        return Err("连接已取消".into());
+    }
     let dir = data_dir(app)?;
     let settings = Settings::load(&dir);
 
@@ -291,6 +316,9 @@ async fn connect_inner(app: &AppHandle) -> Result<(), String> {
     ensure_session(&session, &username, &password, settings.two_fa(), &prompt)
         .await
         .map_err(es)?;
+    if cancelled() {
+        return Err("连接已取消".into());
+    }
     session.save_cookies(dir.join("cookies.json")).map_err(es)?;
     emit(
         app,
@@ -339,9 +367,19 @@ async fn connect_inner(app: &AppHandle) -> Result<(), String> {
         otp_cache: AsyncMutex::new(None),
     });
     let (tx, rx) = mpsc::unbounded_channel::<VpnEvent>();
+    if cancelled() {
+        return Err("连接已取消".into());
+    }
     let handle = vpn::launch(&cfg, auth, tx).await.map_err(es)?;
     *state.handle.lock().await = Some(handle);
     spawn_forwarder(app.clone(), rx);
+    // 取消竞态兜底：断开请求落在最后一个检查点之后时，回收刚拉起的进程
+    if cancelled() {
+        if let Some(h) = state.handle.lock().await.take() {
+            let _ = h.disconnect().await;
+        }
+        return Err("连接已取消".into());
+    }
     Ok(())
 }
 
@@ -358,7 +396,31 @@ async fn do_disconnect(app: AppHandle) -> Result<(), String> {
             );
             h.disconnect().await.map_err(es)
         }
-        None => Err("当前没有进行中的连接".into()),
+        None => {
+            // openvpn 尚未拉起（SSO/2FA 阶段）：中断连接流程本身。
+            // drop 等待中的验证码 sender 让 UiCodePrompt 立即失败，流程快速终止；
+            // connect_inner 的取消检查点随后收尾（含刚拉起进程的兜底回收）。
+            let connecting = *state.status.lock().unwrap() == "connecting";
+            if connecting {
+                state
+                    .cancel_connect
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                *state.code_pending.lock().await = None;
+                *state.status.lock().unwrap() = "idle".into();
+                update_tray(&app, "idle");
+                // 托盘/快捷键发起的中断也要复位主窗口状态（EXITING → idle）
+                emit(
+                    &app,
+                    UiEvent::State {
+                        name: "EXITING".into(),
+                        reason: Some("已中断连接流程".into()),
+                    },
+                );
+                Ok(())
+            } else {
+                Err("当前没有进行中的连接".into())
+            }
+        }
     }
 }
 
@@ -588,11 +650,15 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String>
     if !["sms", "wecom"].contains(&settings.two_fa_method.as_str()) {
         return Err("two_fa_method 仅支持 sms | wecom".into());
     }
-    let hide_tray_changed = {
-        let current = Settings::load(&data_dir(&app)?);
-        current.hide_tray != settings.hide_tray
-    };
-    settings.save(&data_dir(&app)?)?;
+    let dir = data_dir(&app)?;
+    let current = Settings::load(&dir);
+    let hide_tray_changed = current.hide_tray != settings.hide_tray;
+    let hotkey_changed = current.hotkey != settings.hotkey;
+    // 先验证并应用快捷键（格式非法直接报错，settings 不落盘，前端回读放弃）
+    if hotkey_changed {
+        apply_hotkey(&app, &settings.hotkey)?;
+    }
+    settings.save(&dir)?;
     if hide_tray_changed {
         // 托盘隐藏时关窗行为变为直接退出（否则窗口藏起后无法唤回）
         apply_tray_visibility(&app, settings.hide_tray);
@@ -878,13 +944,13 @@ fn draw_tray_icon(status: &str) -> tauri::image::Image<'static> {
             let d = (dx * dx + dy * dy).sqrt();
             let idx = (y * S + x) * 4;
             let mut alpha = 0.0f32;
-            // 圆环 9.5-13px，边缘 1px 线性抗锯齿
-            if (8.5..=13.5).contains(&d) {
-                alpha = 1.0 - (d - 8.5).abs().min((d - 13.5).abs()).clamp(0.0, 1.0);
+            // 粗圆环（半径 7-14，宽 7px），边缘 1px 线性抗锯齿
+            if (7.0..=14.0).contains(&d) {
+                alpha = 1.0 - (d - 7.0).abs().min((d - 14.0).abs()).clamp(0.0, 1.0);
             }
-            // connected 加中心实心点（半径 5.5，同样 1px 抗锯齿）
-            if status == "connected" && d <= 6.5 {
-                alpha = alpha.max(1.0 - (6.5 - d).clamp(0.0, 1.0));
+            // connected 加中心实心点（同样 1px 抗锯齿）
+            if status == "connected" && d <= 9.0 {
+                alpha = alpha.max(1.0 - (9.0 - d).clamp(0.0, 1.0));
             }
             if alpha > 0.0 {
                 let a = (alpha * 255.0) as u8;
@@ -919,6 +985,55 @@ fn apply_tray_visibility(app: &AppHandle, hide: bool) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_visible(!hide);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 全局快捷键（连接/断开切换）
+// ---------------------------------------------------------------------------
+
+/// 按当前状态切换连接：未连接/失败 → 连接；连接中/已连接 → 断开。
+async fn toggle_connect(app: AppHandle) {
+    let status = app
+        .state::<AppState>()
+        .status
+        .lock()
+        .unwrap()
+        .clone();
+    let res = match status.as_str() {
+        "connected" | "connecting" => do_disconnect(app.clone()).await,
+        _ => do_connect(app.clone()).await,
+    };
+    if let Err(e) = res {
+        emit(
+            &app,
+            UiEvent::Notice {
+                text: format!("快捷键操作: {e}"),
+            },
+        );
+    }
+}
+
+/// 按 settings.hotkey 注册全局快捷键（启动与设置变更时调用）。
+/// None/空串 = 清除注册；格式非法返回 Err（前端回读放弃）。
+fn apply_hotkey(app: &AppHandle, hotkey: &Option<String>) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    if let Some(hk) = hotkey.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let shortcut: Shortcut = hk
+            .parse()
+            .map_err(|_| format!("快捷键格式无效: {hk}（示例 Ctrl+Alt+V）"))?;
+        gs.on_shortcut(shortcut, |app, _shortcut, event| {
+            if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    toggle_connect(app).await;
+                });
+            }
+        })
+        .map_err(es)?;
+    }
+    Ok(())
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -979,7 +1094,9 @@ pub fn run() {
             handle: AsyncMutex::new(None),
             status: Mutex::new("idle".into()),
             code_pending: Arc::new(AsyncMutex::new(None)),
+            cancel_connect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_status,
             connect,
@@ -1000,11 +1117,17 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app.handle())?;
             let handle = app.handle();
-            let hide_tray = match data_dir(handle) {
-                Ok(dir) => Settings::load(&dir).hide_tray,
-                Err(_) => false,
+            let dir_settings = match data_dir(handle) {
+                Ok(dir) => Some((dir.clone(), Settings::load(&dir))),
+                Err(_) => None,
             };
-            apply_tray_visibility(handle, hide_tray);
+            if let Some((_, settings)) = &dir_settings {
+                apply_tray_visibility(handle, settings.hide_tray);
+                // 快捷键注册失败不阻断启动（可能与其他软件冲突），仅输出诊断
+                if let Err(e) = apply_hotkey(handle, &settings.hotkey) {
+                    eprintln!("[shu-vpn] 全局快捷键注册失败: {e}");
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
