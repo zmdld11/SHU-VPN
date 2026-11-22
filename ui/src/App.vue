@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// SHU-VPN 主界面：连接控制 / 状态与日志 / 2FA 验证码弹窗 / 首次使用引导 / 设置。
+// SHU-VPN 主界面（毛玻璃深色 · 自绘标题栏）：
+// 大状态环 + 连接控制 / 日志抽屉 / 设置面板（含开机自启）/ 2FA 与首用引导弹窗。
 // 事件契约见 src-tauri/src/lib.rs 的 UiEvent（vpn-event, tag=kind）。
 import { nextTick, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 interface UiEvent {
   kind: "state" | "log" | "notice" | "progress";
@@ -40,6 +42,8 @@ const STATUS_TEXT: Record<string, string> = {
   failed: "连接失败",
 };
 
+const win = getCurrentWindow();
+
 const status = ref("idle");
 const stateName = ref("");
 const logs = ref<string[]>([]);
@@ -48,6 +52,12 @@ const busy = ref(false);
 const installing = ref(false);
 const errMsg = ref("");
 const logBox = ref<HTMLElement | null>(null);
+const showLogs = ref(false);
+const showSettings = ref(false);
+
+// 开机自启（状态以系统计划任务为唯一事实源，见 lib.rs set_autostart）
+const autostart = ref(false);
+const autostartBusy = ref(false);
 
 // 2FA 验证码弹窗
 const showCode = ref(false);
@@ -81,6 +91,14 @@ async function refreshStatus(): Promise<void> {
     status.value = info.value.status;
   } catch (e) {
     log("获取状态失败: " + String(e));
+  }
+}
+
+async function loadAutostart(): Promise<void> {
+  try {
+    autostart.value = await invoke<boolean>("get_autostart");
+  } catch {
+    autostart.value = false;
   }
 }
 
@@ -129,6 +147,7 @@ onMounted(async () => {
   );
   await refreshStatus();
   if (info.value && !info.value.hasCredentials) showCreds.value = true;
+  await loadAutostart();
 });
 
 onUnmounted(() => {
@@ -257,41 +276,93 @@ async function installOpenVpn(): Promise<void> {
     installing.value = false;
   }
 }
+
+async function toggleAutostart(): Promise<void> {
+  autostartBusy.value = true;
+  const next = !autostart.value;
+  try {
+    await invoke("set_autostart", { enable: next });
+    autostart.value = next;
+    log(next ? "✓ 已开启开机自启（下次登录静默启动）" : "已关闭开机自启");
+  } catch (e) {
+    log("✗ 开机自启设置失败: " + String(e));
+  } finally {
+    autostartBusy.value = false;
+  }
+}
+
+async function setTwoFa(method: string): Promise<void> {
+  if (!info.value) return;
+  info.value.settings.twoFaMethod = method;
+  await saveSettings();
+}
+
+async function toggleVerifyTls(): Promise<void> {
+  if (!info.value) return;
+  info.value.settings.verifyTls = !info.value.settings.verifyTls;
+  await saveSettings();
+}
 </script>
 
 <template>
   <div class="shell">
-    <header>
-      <div class="brand"><span class="logo">SH</span>SHU-VPN</div>
-      <div class="chip" :class="status">{{ STATUS_TEXT[status] || status }}</div>
+    <!-- 自绘标题栏（无边框窗口）：拖动区 + 窗口控制 -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <span class="logo">SH</span>
+        <span>SHU-VPN</span>
+      </div>
+      <div class="win-btns">
+        <button class="wbtn" title="最小化" @click="win.minimize()">
+          <svg viewBox="0 0 12 12"><path d="M2 6h8" /></svg>
+        </button>
+        <button class="wbtn" title="最大化/还原" @click="win.toggleMaximize()">
+          <svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1" /></svg>
+        </button>
+        <button class="wbtn close" title="关闭（最小化到托盘）" @click="win.close()">
+          <svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+        </button>
+      </div>
     </header>
 
     <main>
-      <section class="card hero">
-        <div class="state-line">
-          <span class="dot" :class="status"></span>
-          <span class="state-text">
-            {{ STATUS_TEXT[status] || status }}
-            <small v-if="stateName && status === 'connecting'">· {{ stateName }}</small>
-          </span>
+      <!-- 状态环（核心视觉） -->
+      <section class="hero">
+        <div class="ring" :class="status">
+          <div class="ring-icon">
+            <!-- idle / connecting：电源符号 -->
+            <svg v-if="status !== 'connected' && status !== 'failed'" viewBox="0 0 24 24">
+              <path d="M12 3v8" class="ic" />
+              <path d="M6.6 6.6a8 8 0 1 0 10.8 0" class="ic" />
+            </svg>
+            <!-- connected：对勾 -->
+            <svg v-else-if="status === 'connected'" viewBox="0 0 24 24">
+              <path d="M5 12.5l4.5 4.5L19 8" class="ic" />
+            </svg>
+            <!-- failed：感叹号 -->
+            <svg v-else viewBox="0 0 24 24">
+              <path d="M12 5v9" class="ic" />
+              <path d="M12 17.8v.4" class="ic dot-line" />
+            </svg>
+          </div>
         </div>
+        <div class="state-text">{{ STATUS_TEXT[status] || status }}</div>
+        <div v-if="stateName && status === 'connecting'" class="state-sub">{{ stateName }}</div>
         <p v-if="errMsg" class="err">{{ errMsg }}</p>
-        <div class="actions">
-          <button
-            v-if="status !== 'connected'"
-            class="primary"
-            :disabled="busy || status === 'connecting'"
-            @click="connect"
-          >
-            {{ status === "connecting" ? "连接中…" : "连接" }}
-          </button>
-          <button v-else class="danger" :disabled="busy" @click="disconnect">断开</button>
-        </div>
-        <p class="hint">
-          连接过程全自动：SSO 会话静默续期、OTP 令牌自动获取；只有需要两步验证时才会弹窗请输入验证码。
-        </p>
+
+        <button
+          v-if="status !== 'connected'"
+          class="main-btn"
+          :disabled="busy || status === 'connecting'"
+          @click="connect"
+        >
+          {{ status === "connecting" ? "连接中…" : "连接 VPN" }}
+        </button>
+        <button v-else class="main-btn stop" :disabled="busy" @click="disconnect">断开连接</button>
+        <p class="hint">全自动连接：SSO 续期、OTP 令牌自动获取；仅两步验证时需要你输入验证码。</p>
       </section>
 
+      <!-- OpenVPN 缺失提示 -->
       <section v-if="info && !info.openvpnFound" class="banner warn">
         <template v-if="info.msiAvailable">
           <span>未检测到 OpenVPN——应用内置官方安装包，一键安装即可</span>
@@ -305,56 +376,40 @@ async function installOpenVpn(): Promise<void> {
         </template>
       </section>
 
-      <section class="card logs">
-        <div class="logs-head">
-          <span>运行日志</span>
-          <button class="link" @click="logs = []">清空</button>
-        </div>
-        <div ref="logBox" class="log-box">
-          <div v-for="(l, i) in logs" :key="i" class="log-line">{{ l }}</div>
-          <div v-if="!logs.length" class="log-empty">暂无日志</div>
+      <!-- 运行日志抽屉 -->
+      <section class="log-drawer" :class="{ open: showLogs }">
+        <div class="clip">
+          <div ref="logBox" class="log-box">
+            <div v-for="(l, i) in logs" :key="i" class="log-line">{{ l }}</div>
+            <div v-if="!logs.length" class="log-empty">暂无日志</div>
+          </div>
         </div>
       </section>
 
-      <details v-if="info" class="card settings">
-        <summary>设置</summary>
-        <div class="field">
-          <label>两步验证通道</label>
-          <div class="radio-row">
-            <label>
-              <input v-model="info.settings.twoFaMethod" type="radio" value="sms" @change="saveSettings" />
-              手机短信（推荐）
-            </label>
-            <label>
-              <input v-model="info.settings.twoFaMethod" type="radio" value="wecom" @change="saveSettings" />
-              企业微信
-            </label>
-          </div>
-        </div>
-        <div class="field">
-          <label class="check-row">
-            <input v-model="info.settings.verifyTls" type="checkbox" @change="saveSettings" />
-            校验服务器 TLS 证书
-          </label>
-        </div>
-        <div class="field">
-          <label>OpenVPN 程序</label>
-          <p class="muted">
-            {{ info.openvpnPath }}{{ info.openvpnFound ? "" : "（未找到，可自装社区版后重启应用）" }}
-          </p>
-        </div>
-        <div class="field">
-          <label>账号</label>
-          <p class="muted">
-            {{ info.username ? `已保存：${info.username}` : "未保存" }}
-            <button v-if="info.hasCredentials" class="link" @click="clearCreds">清除记住的密码</button>
-          </p>
-        </div>
-      </details>
+      <!-- 底部工具行 -->
+      <footer class="dock">
+        <button class="dock-btn" @click="showSettings = true">
+          <svg viewBox="0 0 16 16">
+            <circle cx="8" cy="8" r="2.2" />
+            <path
+              d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"
+            />
+          </svg>
+          设置
+        </button>
+        <div class="dock-spacer"></div>
+        <button class="dock-btn" :class="{ on: showLogs }" @click="showLogs = !showLogs">
+          运行日志<span v-if="logs.length" class="count">{{ logs.length }}</span>
+          <svg viewBox="0 0 16 16" class="chev" :class="{ flip: showLogs }">
+            <path d="M4 6.5l4 4 4-4" />
+          </svg>
+        </button>
+        <button v-if="showLogs" class="dock-btn" @click="logs = []">清空</button>
+      </footer>
     </main>
 
     <!-- 2FA 验证码弹窗 -->
-    <div v-if="showCode" class="mask">
+    <div v-if="showCode" class="mask" @click.self="cancelCode">
       <div class="modal">
         <h3>输入两步验证码</h3>
         <p>验证码已发送至{{ codeMethod === "sms" ? "手机短信" : "企业微信" }}，5 分钟内有效。</p>
@@ -375,7 +430,7 @@ async function installOpenVpn(): Promise<void> {
     </div>
 
     <!-- 首次使用账号引导 -->
-    <div v-if="showCreds" class="mask">
+    <div v-if="showCreds" class="mask" @click.self="showCreds = false">
       <div class="modal">
         <h3>保存账号</h3>
         <p>学号与密码将存入 Windows 凭据管理器（本机本账户可读），不会写入任何文件。</p>
@@ -393,13 +448,80 @@ async function installOpenVpn(): Promise<void> {
         </div>
       </div>
     </div>
+
+    <!-- 设置面板 -->
+    <div v-if="showSettings" class="mask" @click.self="showSettings = false">
+      <div class="modal settings-panel">
+        <h3>设置</h3>
+
+        <div class="field">
+          <label>两步验证通道</label>
+          <div class="seg">
+            <button
+              :class="{ sel: info?.settings.twoFaMethod === 'sms' }"
+              @click="setTwoFa('sms')"
+            >
+              手机短信
+            </button>
+            <button
+              :class="{ sel: info?.settings.twoFaMethod === 'wecom' }"
+              @click="setTwoFa('wecom')"
+            >
+              企业微信
+            </button>
+          </div>
+        </div>
+
+        <div class="row">
+          <span>校验服务器 TLS 证书</span>
+          <button
+            class="switch"
+            :class="{ on: info?.settings.verifyTls }"
+            :disabled="!info"
+            @click="toggleVerifyTls"
+          ></button>
+        </div>
+
+        <div class="row">
+          <span>开机自启<small>登录 Windows 后静默启动</small></span>
+          <button
+            class="switch"
+            :class="{ on: autostart }"
+            :disabled="autostartBusy"
+            @click="toggleAutostart"
+          ></button>
+        </div>
+
+        <div class="field">
+          <label>OpenVPN 程序</label>
+          <p class="muted">
+            {{ info?.openvpnPath
+            }}{{ info?.openvpnFound ? "" : "（未找到，可自装社区版后重启应用）" }}
+          </p>
+        </div>
+
+        <div class="field">
+          <label>账号</label>
+          <p class="muted">
+            {{ info?.username ? `已保存：${info.username}` : "未保存" }}
+            <button v-if="info?.hasCredentials" class="link" @click="clearCreds">
+              清除记住的密码
+            </button>
+          </p>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost" @click="showSettings = false">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style>
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
 * {
   box-sizing: border-box;
@@ -408,218 +530,302 @@ body {
   margin: 0;
   background: transparent;
 }
+/* acrylic 失效时这层半透明深蓝兜底，不破相 */
 .shell {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 18px 20px;
-  min-height: 100vh;
-  background: linear-gradient(160deg, #10182b, #1c2740);
-  color: #e8ecf4;
+  height: 100vh;
+  overflow: hidden;
+  background: rgba(13, 18, 32, 0.72);
+  color: #e9eef7;
   user-select: none;
 }
-header {
+
+/* ---------- 自绘标题栏 ---------- */
+.titlebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  height: 44px;
+  padding: 0 8px 0 16px;
+  flex: none;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 18px;
+  gap: 9px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
 }
 .logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: #3b6ef5;
-  font-size: 12px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #3b82f6, #06b6d4);
+  font-size: 11px;
   font-weight: 700;
+  color: #fff;
 }
-.chip {
-  font-size: 12px;
-  padding: 3px 12px;
-  border-radius: 999px;
-  border: 1px solid #33415e;
-  color: #93a4c3;
-}
-.chip.connected {
-  color: #34c77b;
-  border-color: #34c77b66;
-}
-.chip.failed {
-  color: #ff7b72;
-  border-color: #ff7b7266;
-}
-.chip.connecting {
-  color: #f0b429;
-  border-color: #f0b42966;
-}
-main {
+.win-btns {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  gap: 2px;
+}
+.wbtn {
+  width: 40px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.wbtn svg {
+  width: 12px;
+  height: 12px;
+  stroke: #a9b6cd;
+  stroke-width: 1.2;
+  fill: none;
+  stroke-linecap: round;
+}
+.wbtn:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+.wbtn.close:hover {
+  background: #e5484d;
+}
+.wbtn.close:hover svg {
+  stroke: #fff;
+}
+
+/* ---------- 主区 ---------- */
+main {
   flex: 1;
   min-height: 0;
-}
-.card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  padding: 16px;
-}
-.hero {
   display: flex;
   flex-direction: column;
+  padding: 6px 20px 14px;
   gap: 10px;
 }
-.state-line {
+.hero {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+/* 状态环 */
+.ring {
+  position: relative;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 22px;
-  font-weight: 600;
+  justify-content: center;
 }
-.state-text small {
-  font-size: 13px;
-  color: #93a4c3;
-  font-weight: 400;
-}
-.dot {
-  width: 14px;
-  height: 14px;
+/* 渐变环身：conic-gradient + mask 挖空成 3px 圆环（状态色由 .ring.<status>::before 覆盖） */
+.ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
   border-radius: 50%;
-  background: #6b7688;
-  flex: none;
+  padding: 3px;
+  background: conic-gradient(from 210deg, #4a5570, #333d52 65%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
 }
-.dot.connected {
-  background: #34c77b;
-  box-shadow: 0 0 10px #34c77b88;
+.ring-icon svg {
+  width: 38px;
+  height: 38px;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
-.dot.connecting {
-  background: #f0b429;
-  animation: pulse 1.2s ease-in-out infinite;
+.ring.idle::before {
+  background: conic-gradient(from 210deg, #4a5570, #333d52 65%);
 }
-.dot.failed {
-  background: #ff7b72;
+.ring.idle .ring-icon svg {
+  stroke: #7c8aa5;
 }
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
+.ring.connecting::before {
+  background: conic-gradient(from 0deg, transparent 15%, #f0b429 85%);
+  animation: spin 1.1s linear infinite;
+}
+.ring.connecting .ring-icon svg {
+  stroke: #f0b429;
+}
+.ring.connected::before {
+  background: conic-gradient(from 210deg, #34d399, #06b6d4 85%);
+  box-shadow: 0 0 24px rgba(52, 211, 153, 0.35);
+}
+.ring.connected .ring-icon svg {
+  stroke: #45dfab;
+}
+.ring.failed::before {
+  background: conic-gradient(from 210deg, #f87171, #b94446 65%);
+}
+.ring.failed .ring-icon svg {
+  stroke: #f87171;
+}
+.ring.connecting .ring-icon svg {
+  animation: breathe 1.2s ease-in-out infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
+}
+@keyframes breathe {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.state-text {
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: 0.4px;
+}
+.state-sub {
+  margin-top: -8px;
+  font-size: 12.5px;
+  color: #93a4c3;
+  font-family: Consolas, "Courier New", monospace;
 }
 .err {
   margin: 0;
-  color: #ff7b72;
-  font-size: 13px;
+  max-width: 100%;
+  color: #ff8585;
+  font-size: 12.5px;
+  line-height: 1.5;
   word-break: break-all;
+  text-align: center;
+  user-select: text;
 }
-.actions {
-  display: flex;
-  gap: 10px;
-}
-button {
-  font: inherit;
+
+/* 主连接按钮 */
+.main-btn {
+  min-width: 200px;
+  padding: 13px 28px;
   border: none;
-  border-radius: 10px;
-  padding: 10px 18px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 1px;
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6, #0891b5);
+  box-shadow: 0 6px 22px rgba(59, 130, 246, 0.32);
   cursor: pointer;
-  color: #e8ecf4;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
 }
-button:disabled {
+.main-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 26px rgba(59, 130, 246, 0.42);
+}
+.main-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+.main-btn.stop {
+  background: linear-gradient(135deg, #e5484d, #b94446);
+  box-shadow: 0 6px 22px rgba(229, 72, 77, 0.3);
+}
+.main-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
-.primary {
-  flex: 1;
-  background: #3b6ef5;
-  font-weight: 600;
+.hint {
+  margin: 0;
+  max-width: 300px;
+  font-size: 11.5px;
+  color: #7e8cab;
+  line-height: 1.7;
+  text-align: center;
 }
-.primary:hover:not(:disabled) {
-  background: #4d7cf7;
-}
-.danger {
-  flex: 1;
-  background: #b8443c;
-  font-weight: 600;
-}
-.danger:hover:not(:disabled) {
-  background: #cf4f46;
-}
-.ghost {
-  background: rgba(255, 255, 255, 0.08);
-}
-.link {
-  background: none;
-  color: #6ea8ff;
-  padding: 0 6px;
-  font-size: 13px;
+
+/* ---------- OpenVPN 缺失 banner ---------- */
+.banner.warn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(240, 180, 41, 0.09);
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: #f0b429;
+  word-break: break-all;
 }
 .btn-mini {
   flex: none;
+  border: none;
   background: #f0b429;
   color: #1a1408;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 650;
   padding: 6px 14px;
   border-radius: 8px;
+  cursor: pointer;
 }
 .btn-mini:hover:not(:disabled) {
   background: #f6c14b;
 }
+.btn-mini:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.link {
+  border: none;
+  background: none;
+  color: #6ea8ff;
+  padding: 0 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
 .link:hover {
   text-decoration: underline;
 }
-.hint {
-  margin: 0;
-  font-size: 12px;
-  color: #93a4c3;
-  line-height: 1.6;
+
+/* ---------- 日志抽屉（grid-rows 过渡展开） ---------- */
+.log-drawer {
+  flex: none;
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
 }
-.banner.warn {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  background: rgba(240, 180, 41, 0.08);
-  border: 1px solid rgba(240, 180, 41, 0.35);
-  border-radius: 12px;
-  padding: 10px 14px;
-  font-size: 13px;
-  color: #f0b429;
-  word-break: break-all;
+.log-drawer.open {
+  grid-template-rows: minmax(0, 190px);
 }
-.logs {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: 1;
-  min-height: 120px;
-}
-.logs-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 13px;
-  color: #93a4c3;
+.log-drawer .clip {
+  overflow: hidden;
+  min-height: 0;
 }
 .log-box {
-  flex: 1;
-  min-height: 110px;
-  max-height: 220px;
+  height: 100%;
+  max-height: 190px;
   overflow-y: auto;
-  background: rgba(0, 0, 0, 0.25);
-  border-radius: 8px;
-  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  padding: 8px 12px;
   font-family: Consolas, "Courier New", monospace;
   font-size: 11.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   user-select: text;
 }
 .log-line {
@@ -630,44 +836,71 @@ button:disabled {
 .log-empty {
   color: #6b7688;
 }
-.settings {
-  color: #cdd6e6;
-}
-.settings summary {
-  cursor: pointer;
-  font-size: 14px;
-}
-.field {
-  margin-top: 12px;
-}
-.field > label {
-  display: block;
-  font-size: 12px;
-  color: #93a4c3;
-  margin-bottom: 6px;
-}
-.radio-row {
-  display: flex;
-  gap: 18px;
-  font-size: 13px;
-}
-.check-row {
+
+/* ---------- 底部工具行 ---------- */
+.dock {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px !important;
-  color: #cdd6e6 !important;
+  gap: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  padding-top: 10px;
 }
-.muted {
-  margin: 0;
-  font-size: 12.5px;
+.dock-spacer {
+  flex: 1;
+}
+.dock-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
   color: #93a4c3;
-  word-break: break-all;
+  font-size: 12.5px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  cursor: pointer;
 }
+.dock-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: #93a4c3;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+}
+.dock-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e9eef7;
+}
+.dock-btn:hover svg {
+  stroke: #e9eef7;
+}
+.dock-btn.on {
+  color: #6ea8ff;
+}
+.dock-btn.on svg {
+  stroke: #6ea8ff;
+}
+.count {
+  font-size: 10.5px;
+  background: rgba(110, 168, 255, 0.16);
+  color: #6ea8ff;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+.chev {
+  transition: transform 0.25s ease;
+}
+.chev.flip {
+  transform: rotate(180deg);
+}
+
+/* ---------- 弹窗 ---------- */
 .mask {
   position: fixed;
   inset: 0;
-  background: rgba(5, 10, 22, 0.72);
+  background: rgba(4, 8, 18, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -677,15 +910,17 @@ button:disabled {
 .modal {
   width: 100%;
   max-width: 340px;
-  background: #182338;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: rgba(21, 28, 45, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
+  border-radius: 16px;
   padding: 20px;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
 }
 .modal h3 {
-  margin: 0 0 8px;
-  font-size: 17px;
+  margin: 0 0 10px;
+  font-size: 16.5px;
 }
 .modal p {
   margin: 0 0 12px;
@@ -700,12 +935,12 @@ button:disabled {
   border-radius: 10px;
   border: 1px solid #33415e;
   background: rgba(0, 0, 0, 0.3);
-  color: #e8ecf4;
+  color: #e9eef7;
   font: inherit;
   outline: none;
 }
 .modal input:focus {
-  border-color: #3b6ef5;
+  border-color: #3b82f6;
 }
 .code-input {
   font-size: 20px;
@@ -715,10 +950,125 @@ button:disabled {
 .modal-actions {
   display: flex;
   gap: 10px;
-  margin-top: 6px;
+  margin-top: 8px;
+}
+button {
+  font: inherit;
 }
 .modal-actions .primary,
 .modal-actions .ghost {
   flex: 1;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #e9eef7;
+}
+.primary {
+  background: linear-gradient(135deg, #3b82f6, #0891b5);
+}
+.primary:hover {
+  filter: brightness(1.1);
+}
+.ghost {
+  background: rgba(255, 255, 255, 0.08);
+}
+.ghost:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* ---------- 设置面板 ---------- */
+.settings-panel {
+  max-width: 360px;
+}
+.field {
+  margin-top: 14px;
+}
+.field > label {
+  display: block;
+  font-size: 12px;
+  color: #93a4c3;
+  margin-bottom: 6px;
+}
+.seg {
+  display: flex;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid #2b3850;
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+}
+.seg button {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #93a4c3;
+  font-size: 13px;
+  padding: 7px 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.seg button.sel {
+  background: rgba(59, 130, 246, 0.28);
+  color: #dbe7ff;
+  font-weight: 600;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 13.5px;
+  color: #dde5f2;
+}
+.row small {
+  display: block;
+  font-size: 11px;
+  color: #7e8cab;
+  margin-top: 2px;
+}
+/* 开关 */
+.switch {
+  flex: none;
+  width: 40px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  padding: 0;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #cfd8ea;
+  transition: left 0.2s ease;
+}
+.switch.on {
+  background: linear-gradient(90deg, #3b82f6, #0891b5);
+}
+.switch.on::after {
+  left: 21px;
+  background: #fff;
+}
+.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.muted {
+  margin: 0;
+  font-size: 12px;
+  color: #93a4c3;
+  word-break: break-all;
+  line-height: 1.6;
 }
 </style>
