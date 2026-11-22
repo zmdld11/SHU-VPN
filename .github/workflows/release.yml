@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -27,16 +28,41 @@ jobs:
           npm install --prefix ui
 
       # 取件官方 OpenVPN MSI 作为内嵌前置依赖（未装 OpenVPN 的机器上应用可一键静默安装）。
-      # 版本升级改 OPENVPN_MSI_VERSION 即可；来源 swupdate.openvpn.org（官方 CDN，HTTPS 取件）。
+      # 来源按序回退：本仓库 vendor release（首选，CDN 抖动时最稳）→ 官方 swupdate CDN。
+      # 用文件魔数（OLE2 头 D0 CF 11 E0）+ 体积校验，杜绝拿到 HTML 错误页；版本升级改
+      # OPENVPN_MSI_VERSION 即可。
       - name: Fetch embedded OpenVPN MSI
         env:
           OPENVPN_MSI_VERSION: "2.7.8"
+          VENDOR_MSI_URL: "https://github.com/zmdld11/SHU-VPN/releases/download/vendor-openvpn-2.7.8/OpenVPN-2.7.8-amd64.msi"
         shell: pwsh
         run: |
           $version = $env:OPENVPN_MSI_VERSION
-          $url = "https://swupdate.openvpn.org/community/releases/OpenVPN-$version-amd64.msi"
           $out = "src-tauri/resources/openvpn-prereq.msi"
-          Invoke-WebRequest -Uri $url -OutFile $out -MaximumRedirection 5
+          $urls = @(
+            $env:VENDOR_MSI_URL,
+            "https://swupdate.openvpn.org/community/releases/OpenVPN-$version-amd64.msi",
+            "https://swupdate.openvpn.net/community/releases/OpenVPN-$version-amd64.msi"
+          )
+          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+          $ok = $false
+          foreach ($u in $urls) {
+            Write-Host ">> trying $u"
+            try {
+              curl.exe -fsSL --retry 2 --connect-timeout 20 -A $ua -o $out $u
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $out)) {
+                $len = (Get-Item $out).Length
+                $bytes = [System.IO.File]::ReadAllBytes($out)
+                $magic = (($bytes[0..3] | ForEach-Object { $_.ToString('X2') }) -join ' ')
+                Write-Host ">> got $len bytes, magic=$magic"
+                if ($len -gt 3000000 -and $magic -eq 'D0 CF 11 E0') { $ok = $true; break }
+                Write-Host ">> 内容不是 MSI（HTML 错误页或体积异常），换下一个来源"
+              } else {
+                Write-Host ">> curl 退出码 $LASTEXITCODE"
+              }
+            } catch { Write-Host ">> failed: $_" }
+          }
+          if (-not $ok) { throw "未能获取 OpenVPN $version MSI：所有来源均失败（检查 vendor release 是否存在 / CDN 状态）" }
           $hash = (Get-FileHash $out -Algorithm SHA256).Hash
           "$hash  openvpn-prereq.msi (OpenVPN $version)" | Out-File -Encoding ascii "src-tauri/resources/openvpn-prereq.msi.sha256"
           Write-Host "Fetched OpenVPN $version MSI, sha256=$hash"
