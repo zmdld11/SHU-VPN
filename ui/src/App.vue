@@ -294,7 +294,7 @@ async function installOpenVpn(): Promise<void> {
 
       <section v-if="info && !info.openvpnFound" class="banner warn">
         <template v-if="info.msiAvailable">
-          <span>未检测到 OpenVPN——应用内置官方安装包（2.7.8），一键安装即可</span>
+          <span>未检测到 OpenVPN——应用内置官方安装包，一键安装即可</span>
           <button class="btn-mini" :disabled="installing" @click="installOpenVpn">
             {{ installing ? "安装中…" : "一键安装" }}
           </button>

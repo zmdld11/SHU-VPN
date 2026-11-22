@@ -29,6 +29,9 @@ const KEY_PASSWORD: &str = "vpn.password";
 const CODE_TIMEOUT: Duration = Duration::from_secs(180);
 /// 前端据此识别「未保存凭据」并弹首次使用引导。
 const NO_CREDENTIALS: &str = "NO_CREDENTIALS:尚未保存学号与密码";
+/// 内嵌官方 MSI 的 SHA256（与 release.yml 的 VENDOR_MSI_SHA256 一致）。
+/// 安装前校验，杜绝损坏/被替换的包交给 msiexec。
+const PREREQ_MSI_SHA256: &str = "D050EFADC6CABC4E304EB810DD7FEDFC54B859D34730AB9CDCB22D61EB86AB7A";
 
 // ---------------------------------------------------------------------------
 // 设置（应用数据目录 settings.json）
@@ -382,6 +385,32 @@ fn find_prereq_msi(app: &AppHandle) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// 去掉 Windows verbatim 前缀（`\\?\` / `\\?\UNC\`）。msiexec 不认这类路径
+/// （实测返回 1619 ERROR_INSTALL_PACKAGE_OPEN_FAILED，与文件本身无关）。
+fn plain_path(p: &Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest.to_string())
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// 计算文件 SHA256（大写 hex）。
+async fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = tokio::fs::read(path).await.map_err(es)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // tauri 命令
 // ---------------------------------------------------------------------------
@@ -497,35 +526,55 @@ fn open_url(url: String) -> Result<(), String> {
 /// 要求当前进程有管理员权限（release 构建为 requireAdministrator）。
 #[tauri::command]
 async fn install_openvpn(app: AppHandle) -> Result<(), String> {
-    let msi = find_prereq_msi(&app)
+    let embedded = find_prereq_msi(&app)
         .ok_or_else(|| "安装包里没有内置 OpenVPN 安装包，请从官方下载安装".to_string())?;
+
+    // ① 完整性校验：损坏/被替换的包直接拒绝，不交给 msiexec
+    let digest = sha256_file(&embedded).await?;
+    if !digest.eq_ignore_ascii_case(PREREQ_MSI_SHA256) {
+        return Err(
+            "内嵌 OpenVPN 安装包校验失败（SHA256 不匹配），请重新安装 SHU-VPN 或手动安装官方 OpenVPN"
+                .into(),
+        );
+    }
+
+    // ② 复制到应用数据目录再安装：规避 Program Files 下资源目录的 ACL/锁定边角，
+    //    并统一为非 verbatim 路径（msiexec 不认 \\?\ 前缀，实测 1619）
+    let dir = data_dir(&app)?;
+    let local = dir.join("openvpn-prereq.msi");
+    tokio::fs::copy(&embedded, &local).await.map_err(es)?;
+
     emit(
         &app,
         UiEvent::Progress {
             text: "正在静默安装官方 OpenVPN（约 30-60 秒）…".into(),
         },
     );
+    // ③ 全量日志落盘：任何失败都可凭日志定位（%LOCALAPPDATA%\com.zmdld11.shuvpn\）
+    let log = dir.join("msiexec-verbose.log");
     let output = tokio::process::Command::new("msiexec")
         .arg("/i")
-        .arg(&msi)
+        .arg(plain_path(&local))
         .args(["/qn", "/norestart"])
+        .arg("/L*v")
+        .arg(plain_path(&log))
         .output()
         .await
         .map_err(es)?;
     let code = output.status.code().unwrap_or(-1);
-    // 3010 = 安装成功但建议重启（对 VPN 使用无影响）
-    if code != 0 && code != 3010 {
-        // 1638 = 已存在同版本或其他版本——重探一次已装路径再判定
-        let found = Path::new(vpn::DEFAULT_OPENVPN_PATH).exists();
-        if !(found && code == 1638) {
-            return Err(format!(
-                "OpenVPN 静默安装失败（msiexec 退出码 {code}），请手动从官方下载安装"
-            ));
-        }
+    let openvpn_ready = Path::new(vpn::DEFAULT_OPENVPN_PATH).exists();
+    // 0 = 成功；3010 = 成功但建议重启；1638 = 本机已有其他版本（复用已装版本即可）
+    let ok = code == 0 || code == 3010 || (code == 1638 && openvpn_ready);
+    if !ok {
+        return Err(format!(
+            "OpenVPN 静默安装失败（msiexec 退出码 {code}），详细日志: {}",
+            log.display()
+        ));
     }
-    if !Path::new(vpn::DEFAULT_OPENVPN_PATH).exists() {
+    if !openvpn_ready {
         return Err("OpenVPN 安装完成但未检测到 openvpn.exe，请在设置中指定路径".into());
     }
+    let _ = tokio::fs::remove_file(&local).await;
     emit(
         &app,
         UiEvent::Progress {
