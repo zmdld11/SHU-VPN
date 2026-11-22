@@ -23,6 +23,10 @@ cookie*.json
 .env
 .env.*
 
+# 内嵌前置依赖（release.yml 从官方 swupdate 取件，不入库）
+src-tauri/resources/*.msi
+src-tauri/resources/*.sha256
+
 # IDE / 系统杂项
 .vscode/
 .idea/

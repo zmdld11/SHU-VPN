@@ -26,6 +26,7 @@ interface StatusInfo {
   settings: Settings;
   openvpnPath: string;
   openvpnFound: boolean;
+  msiAvailable: boolean;
 }
 
 /** 学校官方 shu.ovpn 下载页（README「配置来源」同款地址） */
@@ -44,6 +45,7 @@ const stateName = ref("");
 const logs = ref<string[]>([]);
 const info = ref<StatusInfo | null>(null);
 const busy = ref(false);
+const installing = ref(false);
 const errMsg = ref("");
 const logBox = ref<HTMLElement | null>(null);
 
@@ -241,6 +243,20 @@ async function clearCreds(): Promise<void> {
 function openDownload(): void {
   invoke("open_url", { url: OFFICIAL_DOWNLOAD }).catch((e) => log(String(e)));
 }
+
+async function installOpenVpn(): Promise<void> {
+  installing.value = true;
+  try {
+    await invoke("install_openvpn");
+    await refreshStatus();
+    log("✓ OpenVPN 安装完成，可以直接连接");
+  } catch (e) {
+    errMsg.value = String(e);
+    log("✗ OpenVPN 安装失败: " + String(e));
+  } finally {
+    installing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -277,8 +293,16 @@ function openDownload(): void {
       </section>
 
       <section v-if="info && !info.openvpnFound" class="banner warn">
-        <span>未检测到 OpenVPN 社区版（{{ info.openvpnPath }}）</span>
-        <button class="link" @click="openDownload">前往官方下载</button>
+        <template v-if="info.msiAvailable">
+          <span>未检测到 OpenVPN——应用内置官方安装包（2.7.8），一键安装即可</span>
+          <button class="btn-mini" :disabled="installing" @click="installOpenVpn">
+            {{ installing ? "安装中…" : "一键安装" }}
+          </button>
+        </template>
+        <template v-else>
+          <span>未检测到 OpenVPN 社区版（{{ info.openvpnPath }}）</span>
+          <button class="link" @click="openDownload">前往官方下载</button>
+        </template>
       </section>
 
       <section class="card logs">
@@ -536,6 +560,18 @@ button:disabled {
   color: #6ea8ff;
   padding: 0 6px;
   font-size: 13px;
+}
+.btn-mini {
+  flex: none;
+  background: #f0b429;
+  color: #1a1408;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 8px;
+}
+.btn-mini:hover:not(:disabled) {
+  background: #f6c14b;
 }
 .link:hover {
   text-decoration: underline;

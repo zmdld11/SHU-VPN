@@ -26,6 +26,21 @@ jobs:
           npm install
           npm install --prefix ui
 
+      # 取件官方 OpenVPN MSI 作为内嵌前置依赖（未装 OpenVPN 的机器上应用可一键静默安装）。
+      # 版本升级改 OPENVPN_MSI_VERSION 即可；来源 swupdate.openvpn.org（官方 CDN，HTTPS 取件）。
+      - name: Fetch embedded OpenVPN MSI
+        env:
+          OPENVPN_MSI_VERSION: "2.7.8"
+        shell: pwsh
+        run: |
+          $version = $env:OPENVPN_MSI_VERSION
+          $url = "https://swupdate.openvpn.org/community/releases/OpenVPN-$version-amd64.msi"
+          $out = "src-tauri/resources/openvpn-prereq.msi"
+          Invoke-WebRequest -Uri $url -OutFile $out -MaximumRedirection 5
+          $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+          "$hash  openvpn-prereq.msi (OpenVPN $version)" | Out-File -Encoding ascii "src-tauri/resources/openvpn-prereq.msi.sha256"
+          Write-Host "Fetched OpenVPN $version MSI, sha256=$hash"
+
       - name: Build & bundle (NSIS)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -33,6 +48,6 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "SHU-VPN v__VERSION__"
-          releaseBody: "下载 SHU-VPN_x.y.z_x64-setup.exe 安装；需已安装 OpenVPN 社区版。"
+          releaseBody: "下载 SHU-VPN_x.y.z_x64-setup.exe 安装。未安装 OpenVPN 社区版时，应用内置官方安装包可一键安装；已装版本则直接复用。"
           releaseDraft: true
           prerelease: false

@@ -57,9 +57,24 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 - 学校系统升级导致内置配置失效时，优先以上方地址为准，用 `--config` 指向新文件；
   并欢迎提 issue 同步更新内置配置。
 
+## 内置 OpenVPN（前置依赖）
+
+发布版安装包内嵌**官方未修改**的 OpenVPN 2.7.8 Windows MSI（amd64）：未检测到
+OpenVPN 社区版时，应用可一键静默安装（约 30-60s，含官方签名的 TAP 驱动）；
+已安装则直接复用本机版本，不重复安装。
+
+- 来源：官方 CDN `swupdate.openvpn.org`（release 流水线取件，安装包内附 SHA256 记录）
+- 许可合规：OpenVPN 为 GPLv2，许可全文随包分发
+  （`src-tauri/resources/OPENVPN-LICENSE-GPLv2.txt`）；TAP 驱动 tap-windows6 为
+  GPL-2.0 / MIT 双许可
+- 不修改、不重打包任何 OpenVPN 二进制；升级官方版本只需改 release.yml 里的
+  `OPENVPN_MSI_VERSION`
+- 开发模式（`npm run tauri dev`）不内嵌 MSI，需自行安装 OpenVPN 社区版
+
 ## 开发
 
-前置依赖：Rust (MSVC)、Node.js ≥ 20、WebView2（Win11 自带）、已安装 OpenVPN 社区版。
+前置依赖：Rust (MSVC)、Node.js ≥ 20、WebView2（Win11 自带）、已安装 OpenVPN 社区版
+（开发调试需要；发布版未安装时可用内置的一键安装）。
 
 ```bash
 npm install && npm install --prefix ui   # 安装前端依赖（根 + ui）

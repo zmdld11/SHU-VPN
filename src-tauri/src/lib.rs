@@ -365,6 +365,23 @@ fn spawn_forwarder(app: AppHandle, mut rx: mpsc::UnboundedReceiver<VpnEvent>) {
     });
 }
 
+/// 内置前置依赖 MSI（NSIS resources；release.yml 从官方 swupdate 取件）。
+/// 兼容多种 resources 落盘布局（保持相对路径 / 平铺 / exe 同级）。
+fn find_prereq_msi(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join("resources").join("openvpn-prereq.msi"));
+        candidates.push(dir.join("openvpn-prereq.msi"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("resources").join("openvpn-prereq.msi"));
+            candidates.push(dir.join("openvpn-prereq.msi"));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
 // ---------------------------------------------------------------------------
 // tauri 命令
 // ---------------------------------------------------------------------------
@@ -378,6 +395,8 @@ struct StatusInfo {
     settings: Settings,
     openvpn_path: String,
     openvpn_found: bool,
+    /// 安装包内置了 OpenVPN MSI（可一键安装前置依赖）。
+    msi_available: bool,
 }
 
 #[tauri::command]
@@ -395,6 +414,7 @@ fn get_status(app: AppHandle) -> StatusInfo {
         .clone()
         .unwrap_or_else(|| vpn::DEFAULT_OPENVPN_PATH.to_string());
     let openvpn_found = Path::new(&openvpn_path).exists();
+    let msi_available = find_prereq_msi(&app).is_some();
     let status = app.state::<AppState>().status.lock().unwrap().clone();
     StatusInfo {
         status,
@@ -403,6 +423,7 @@ fn get_status(app: AppHandle) -> StatusInfo {
         settings,
         openvpn_path,
         openvpn_found,
+        msi_available,
     }
 }
 
@@ -469,6 +490,48 @@ fn open_url(url: String) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map_err(es)?;
+    Ok(())
+}
+
+/// 静默安装内置的官方 OpenVPN MSI（前置依赖，约 30-60s）。
+/// 要求当前进程有管理员权限（release 构建为 requireAdministrator）。
+#[tauri::command]
+async fn install_openvpn(app: AppHandle) -> Result<(), String> {
+    let msi = find_prereq_msi(&app)
+        .ok_or_else(|| "安装包里没有内置 OpenVPN 安装包，请从官方下载安装".to_string())?;
+    emit(
+        &app,
+        UiEvent::Progress {
+            text: "正在静默安装官方 OpenVPN（约 30-60 秒）…".into(),
+        },
+    );
+    let output = tokio::process::Command::new("msiexec")
+        .arg("/i")
+        .arg(&msi)
+        .args(["/qn", "/norestart"])
+        .output()
+        .await
+        .map_err(es)?;
+    let code = output.status.code().unwrap_or(-1);
+    // 3010 = 安装成功但建议重启（对 VPN 使用无影响）
+    if code != 0 && code != 3010 {
+        // 1638 = 已存在同版本或其他版本——重探一次已装路径再判定
+        let found = Path::new(vpn::DEFAULT_OPENVPN_PATH).exists();
+        if !(found && code == 1638) {
+            return Err(format!(
+                "OpenVPN 静默安装失败（msiexec 退出码 {code}），请手动从官方下载安装"
+            ));
+        }
+    }
+    if !Path::new(vpn::DEFAULT_OPENVPN_PATH).exists() {
+        return Err("OpenVPN 安装完成但未检测到 openvpn.exe，请在设置中指定路径".into());
+    }
+    emit(
+        &app,
+        UiEvent::Progress {
+            text: "✓ 官方 OpenVPN 已安装".into(),
+        },
+    );
     Ok(())
 }
 
@@ -547,6 +610,7 @@ pub fn run() {
             clear_credentials,
             save_settings,
             open_url,
+            install_openvpn,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
