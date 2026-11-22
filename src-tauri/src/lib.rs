@@ -522,6 +522,88 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 开机自启（计划任务方案）
+// ---------------------------------------------------------------------------
+// 本应用是 requireAdministrator 提权程序：HKCU Run 注册表键对提权程序无效
+// （登录时被 UAC 静默拦截）。正确做法是注册「以最高权限运行」的登录触发
+// 计划任务——登录时静默启动、不弹 UAC。状态以系统计划任务为唯一事实源，
+// 不落 settings.json，避免与系统状态不同步。
+
+const AUTOSTART_TASK: &str = "SHU-VPN";
+
+// schtasks.exe 是控制台程序，调用时同样必须抑制窗口（否则每次开关设置弹黑框）
+#[cfg(target_os = "windows")]
+fn hide_console(cmd: &mut tokio::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console(_cmd: &mut tokio::process::Command) {}
+
+async fn run_schtasks(args: &[&str]) -> Result<std::process::Output, String> {
+    let mut cmd = tokio::process::Command::new("schtasks");
+    hide_console(&mut cmd);
+    cmd.args(args).output().await.map_err(es)
+}
+
+#[tauri::command]
+async fn get_autostart() -> Result<bool, String> {
+    // 任务存在 → 退出码 0；不存在 → 非 0（输出为本地化编码，不用内容判定）
+    Ok(run_schtasks(&["/query", "/tn", AUTOSTART_TASK])
+        .await?
+        .status
+        .success())
+}
+
+#[tauri::command]
+async fn set_autostart(enable: bool) -> Result<(), String> {
+    if enable {
+        // /tr 的值内嵌引号：安装路径（Program Files）带空格时 schtasks 会按
+        // 空格拆分动作，不引会得到残缺的启动命令
+        let exe = std::env::current_exe().map_err(es)?;
+        let tr = format!("\"{}\"", exe.display());
+        let out = run_schtasks(&[
+            "/create",
+            "/tn",
+            AUTOSTART_TASK,
+            "/tr",
+            &tr,
+            "/sc",
+            "onlogon",
+            "/rl",
+            "highest",
+            "/f",
+        ])
+        .await?;
+        if !out.status.success() {
+            return Err(format!(
+                "注册开机自启失败（schtasks 退出码 {:?}）。开发模式（非管理员）下此功能不可用",
+                out.status.code()
+            ));
+        }
+    } else {
+        // 先查询：任务本就不存在时直接视为成功（schtasks 输出是本地化编码，无法按内容判重）
+        if !run_schtasks(&["/query", "/tn", AUTOSTART_TASK])
+            .await?
+            .status
+            .success()
+        {
+            return Ok(());
+        }
+        let out = run_schtasks(&["/delete", "/tn", AUTOSTART_TASK, "/f"]).await?;
+        if !out.status.success() {
+            return Err(format!(
+                "取消开机自启失败（schtasks 退出码 {:?}）",
+                out.status.code()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 静默安装内置的官方 OpenVPN MSI（前置依赖，约 30-60s）。
 /// 要求当前进程有管理员权限（release 构建为 requireAdministrator）。
 #[tauri::command]
@@ -660,6 +742,8 @@ pub fn run() {
             save_settings,
             open_url,
             install_openvpn,
+            get_autostart,
+            set_autostart,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
