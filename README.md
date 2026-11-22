@@ -45,6 +45,12 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 | probe 真实联调 | #4 | ✅ |
 | 桌面 VPN 管理（management 接口） | #5 | ✅ 实测 CONNECTED |
 | UI + v0.1 发布 | #6 | ✅（v0.1.0） |
+| 发布前打磨（毛玻璃 UI / 自启 / 黑窗修复） | #7 | ✅（v0.2.0） |
+
+## 下载
+
+最新版安装包见 [Releases](https://github.com/zmdld11/SHU-VPN/releases/latest)
+（`SHU-VPN_x.y.z_x64-setup.exe`，约 7.3 MB，含官方未修改 OpenVPN 2.7.9；安装需管理员权限）。
 
 ## 配置来源
 
