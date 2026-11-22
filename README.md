@@ -44,7 +44,7 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 | core-OTP（预热 / 取码） | #3 | ✅ |
 | probe 真实联调 | #4 | ✅ |
 | 桌面 VPN 管理（management 接口） | #5 | ✅ 实测 CONNECTED |
-| UI + v0.1 发布 | #6 | 🚧 进行中 |
+| UI + v0.1 发布 | #6 | ✅（v0.1.0） |
 
 ## 配置来源
 
