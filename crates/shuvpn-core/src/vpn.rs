@@ -45,6 +45,12 @@ const MAX_AUTH_FAILURES: usize = 3;
 // 事件与状态
 // ---------------------------------------------------------------------------
 
+/// 连接等待的看门狗间隔（兜底释放 hold / 静默超时检查）。
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
+
+/// 看门狗最多补发 hold release 的次数（避免异常场景无限循环）。
+const MAX_WATCHDOG_RELEASES: usize = 3;
+
 /// 连接过程中对外广播的事件。
 #[derive(Debug, Clone)]
 pub enum VpnEvent {
@@ -108,6 +114,10 @@ pub enum MgmtEvent {
         dynamic: Option<DynamicChallenge>,
     },
     AuthToken,
+    /// openvpn 处于 hold 等待状态（应答 `hold release` 以启动连接）。
+    /// 注意：该通知可能滞后于握手——GUI 的标准做法是**收到 >HOLD 才释放**，
+    /// 握手阶段立即释放会与主线程进入 hold 等待产生竞态（实测 2.7.8 卡死）。
+    Hold,
     Log(String),
     Info(String),
     Infomsg(String),
@@ -171,6 +181,7 @@ pub fn parse_mgmt_line(line: &str) -> MgmtEvent {
         "INFO" => MgmtEvent::Info(payload.to_string()),
         "INFOMSG" => MgmtEvent::Infomsg(payload.to_string()),
         "FATAL" => MgmtEvent::Fatal(payload.to_string()),
+        "HOLD" => MgmtEvent::Hold,
         _ => MgmtEvent::Other(line.to_string()),
     }
 }
@@ -472,14 +483,21 @@ async fn supervise(
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
-    // 握手：开启实时日志/状态通知，解除 hold（docs/protocol.md §6）
-    for init in ["log on", "state on", "hold release"] {
+    // 握手：开启实时日志/状态通知。**不在此处释放 hold**——立即释放会与
+    // openvpn 主线程进入 hold 等待产生竞态（实测 2.7.8 卡死），标准做法
+    // （openvpn-gui）是收到 >HOLD 通知后再 `hold release`。
+    for init in ["log on", "state on"] {
         let _ = writer.write_all(format!("{init}\n").as_bytes()).await;
     }
     let _ = writer.flush().await;
 
     let mut pending_dynamic: Option<DynamicChallenge> = None;
     let mut auth_failures = 0usize;
+    let mut connected = false;
+    // 看门狗：若 openvpn 因版本/时序差异没有发出 >HOLD 通知，超时后兜底释放一次
+    let mut watchdog_fires = 0usize;
+    let watchdog = tokio::time::sleep(WATCHDOG_INTERVAL);
+    tokio::pin!(watchdog);
 
     loop {
         tokio::select! {
@@ -488,9 +506,21 @@ async fn supervise(
                     Ok(Some(line)) => {
                         let line = line.trim_end().to_string();
                         if line.is_empty() { continue; }
+                        watchdog.as_mut().reset(tokio::time::Instant::now() + WATCHDOG_INTERVAL);
                         match parse_mgmt_line(&line) {
+                            MgmtEvent::Hold => {
+                                // 收到 >HOLD：此时释放才真正生效
+                                let _ = writer
+                                    .write_all(b"hold release\n")
+                                    .await;
+                                let _ = writer.flush().await;
+                                let _ = events.send(VpnEvent::Notice("已应答 >HOLD，释放并启动连接".into()));
+                            }
                             MgmtEvent::State { name, reason } => {
                                 auth_failures = 0;
+                                if name == "CONNECTED" {
+                                    connected = true;
+                                }
                                 let _ = events.send(VpnEvent::State { name: name.clone(), reason });
                                 if name == "EXITING" {
                                     break;
@@ -576,10 +606,30 @@ async fn supervise(
                 }
             }
             Some(cmd) = cmd_rx.recv() => {
+                watchdog.as_mut().reset(tokio::time::Instant::now() + WATCHDOG_INTERVAL);
                 if writer.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
                     break;
                 }
                 let _ = writer.flush().await;
+            }
+            _ = &mut watchdog => {
+                if connected {
+                    // 已连接后静默属正常，不干预
+                    watchdog.as_mut().reset(tokio::time::Instant::now() + WATCHDOG_INTERVAL);
+                    continue;
+                }
+                watchdog_fires += 1;
+                if watchdog_fires > MAX_WATCHDOG_RELEASES {
+                    fail(&events, child, "连接启动超时：多次兜底释放 hold 后仍无进展").await;
+                    break;
+                }
+                // 兜底：某些版本/时序下收不到 >HOLD，超时补发一次释放
+                let _ = writer.write_all(b"hold release\n").await;
+                let _ = writer.flush().await;
+                let _ = events.send(VpnEvent::Notice(format!(
+                    "看门狗兜底：未见 >HOLD，第 {watchdog_fires} 次补发 hold release"
+                )));
+                watchdog.as_mut().reset(tokio::time::Instant::now() + WATCHDOG_INTERVAL);
             }
             else => break,
         }
