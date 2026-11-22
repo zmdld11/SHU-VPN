@@ -21,7 +21,8 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-keyring = "3"
+# 默认 feature 为空（mock 内存凭据库，跨进程即空），必须显式启用平台后端
+keyring = { version = "3", features = ["windows-native"] }
 
 [dev-dependencies]
 wiremock = "0.6"
