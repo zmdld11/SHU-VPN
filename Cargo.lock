@@ -3656,6 +3656,7 @@ name = "shu-vpn"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "log",
  "serde",
  "serde_json",

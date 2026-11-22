@@ -46,6 +46,12 @@ struct Settings {
     verify_tls: bool,
     /// openvpn.exe 自定义路径（None = 默认安装路径）。
     openvpn_path: Option<String>,
+    /// 隐藏托盘图标（关窗行为随之变为直接退出，否则无法唤回窗口）。
+    hide_tray: bool,
+    /// 分流模式：仅校内网段走 VPN（route-nopull + 学习到的网段显式指路）。
+    split_tunnel: bool,
+    /// 自定义背景图文件名（存于应用数据目录，None = 默认毛玻璃）。
+    wallpaper: Option<String>,
 }
 
 impl Default for Settings {
@@ -54,6 +60,9 @@ impl Default for Settings {
             two_fa_method: "sms".into(),
             verify_tls: true,
             openvpn_path: None,
+            hide_tray: false,
+            split_tunnel: false,
+            wallpaper: None,
         }
     }
 }
@@ -224,16 +233,15 @@ async fn do_connect(app: AppHandle) -> Result<(), String> {
         }
         *status = "connecting".into();
     }
+    update_tray(&app, "connecting");
 
     match connect_inner(&app).await {
         Ok(()) => Ok(()),
         Err(msg) => {
             let cancelled = msg.contains("取消");
-            *app.state::<AppState>().status.lock().unwrap() = if cancelled {
-                "idle".into()
-            } else {
-                "failed".into()
-            };
+            let final_status = if cancelled { "idle" } else { "failed" };
+            *app.state::<AppState>().status.lock().unwrap() = final_status.into();
+            update_tray(&app, final_status);
             emit(
                 &app,
                 UiEvent::Notice {
@@ -299,6 +307,28 @@ async fn connect_inner(app: &AppHandle) -> Result<(), String> {
     if let Some(custom) = settings.openvpn_path.as_deref().filter(|s| !s.is_empty()) {
         cfg.openvpn_path = PathBuf::from(custom);
     }
+    if settings.split_tunnel {
+        // 分流模式：忽略服务器推送路由，用学习到的校内网段显式指路。
+        // 没学过网段（从未全局连接成功过）则拒绝，避免空分流。
+        let routes = load_learned_routes(&dir);
+        if routes.is_empty() {
+            return Err(
+                "分流模式需要先正常（全局）连接一次以学习校内网段，请关闭分流后连接一次"
+                    .into(),
+            );
+        }
+        cfg.route_nopull = true;
+        cfg.extra_routes = routes
+            .into_iter()
+            .map(|r| (r.net, r.mask))
+            .collect();
+        emit(
+            app,
+            UiEvent::Progress {
+                text: "分流模式：仅校内网段走 VPN，其余流量直连".into(),
+            },
+        );
+    }
 
     // ④ 拉起 openvpn 并转发事件
     let auth = Arc::new(GuiAuth {
@@ -336,6 +366,8 @@ async fn do_disconnect(app: AppHandle) -> Result<(), String> {
 fn spawn_forwarder(app: AppHandle, mut rx: mpsc::UnboundedReceiver<VpnEvent>) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
+        // 本次连接学到的校内网段（PUSH_REPLY）；CONNECTED 时落盘为分流模式缓存
+        let mut learned: std::collections::BTreeSet<(String, String)> = Default::default();
         loop {
             match rx.recv().await {
                 Some(VpnEvent::State { name, reason }) => {
@@ -346,7 +378,35 @@ fn spawn_forwarder(app: AppHandle, mut rx: mpsc::UnboundedReceiver<VpnEvent>) {
                         _ => "connecting",
                     };
                     *state.status.lock().unwrap() = next.to_string();
+                    update_tray(&app, next);
+                    if name == "CONNECTED" && !learned.is_empty() {
+                        // 全局连接成功：用本次学习结果覆盖网段缓存（学校改网段时自动跟进）
+                        let routes: Vec<LearnedRoute> = learned
+                            .iter()
+                            .map(|(net, mask)| LearnedRoute {
+                                net: net.clone(),
+                                mask: mask.clone(),
+                            })
+                            .collect();
+                        if let Ok(dir) = app.path().app_local_data_dir() {
+                            if let Ok(json) = serde_json::to_vec_pretty(&routes) {
+                                let _ = std::fs::write(routes_path(&dir), json);
+                                emit(
+                                    &app,
+                                    UiEvent::Notice {
+                                        text: format!(
+                                            "已学习 {} 个校内网段（分流模式可用）",
+                                            routes.len()
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                    }
                     emit(&app, UiEvent::State { name, reason });
+                }
+                Some(VpnEvent::RoutePushed { net, mask }) => {
+                    learned.insert((net, mask));
                 }
                 Some(VpnEvent::Log(line)) => emit(&app, UiEvent::Log { line }),
                 Some(VpnEvent::Notice(text)) => emit(&app, UiEvent::Notice { text }),
@@ -426,6 +486,26 @@ struct StatusInfo {
     openvpn_found: bool,
     /// 安装包内置了 OpenVPN MSI（可一键安装前置依赖）。
     msi_available: bool,
+    /// 已学习的校内网段数（分流模式可用性提示）。
+    routes_learned: usize,
+}
+
+/// 分流模式网段缓存（连接时从 PUSH_REPLY 学习，见 VpnEvent::RoutePushed）。
+fn routes_path(dir: &Path) -> PathBuf {
+    dir.join("routes.json")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LearnedRoute {
+    net: String,
+    mask: String,
+}
+
+fn load_learned_routes(dir: &Path) -> Vec<LearnedRoute> {
+    std::fs::read(routes_path(dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -444,6 +524,7 @@ fn get_status(app: AppHandle) -> StatusInfo {
         .unwrap_or_else(|| vpn::DEFAULT_OPENVPN_PATH.to_string());
     let openvpn_found = Path::new(&openvpn_path).exists();
     let msi_available = find_prereq_msi(&app).is_some();
+    let routes_learned = load_learned_routes(&dir).len();
     let status = app.state::<AppState>().status.lock().unwrap().clone();
     StatusInfo {
         status,
@@ -453,6 +534,7 @@ fn get_status(app: AppHandle) -> StatusInfo {
         openvpn_path,
         openvpn_found,
         msi_available,
+        routes_learned,
     }
 }
 
@@ -506,7 +588,16 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String>
     if !["sms", "wecom"].contains(&settings.two_fa_method.as_str()) {
         return Err("two_fa_method 仅支持 sms | wecom".into());
     }
-    settings.save(&data_dir(&app)?)
+    let hide_tray_changed = {
+        let current = Settings::load(&data_dir(&app)?);
+        current.hide_tray != settings.hide_tray
+    };
+    settings.save(&data_dir(&app)?)?;
+    if hide_tray_changed {
+        // 托盘隐藏时关窗行为变为直接退出（否则窗口藏起后无法唤回）
+        apply_tray_visibility(&app, settings.hide_tray);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -604,6 +695,76 @@ async fn set_autostart(enable: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 自定义背景图（存应用数据目录 wallpaper.img，前端以 data URL 应用）
+// ---------------------------------------------------------------------------
+
+const WALLPAPER_MAX: usize = 10 * 1024 * 1024;
+
+/// 按魔数识别图片格式（不信任扩展名与前端 mime 声明）。
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+async fn set_wallpaper(app: AppHandle, data: String) -> Result<(), String> {
+    // 前端传 data URL（data:image/png;base64,xxx）；兼容只传 base64 部分的情况
+    let b64 = data.rsplit(',').next().unwrap_or(&data);
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(es)?;
+    if bytes.len() > WALLPAPER_MAX {
+        return Err("图片过大（上限 10MB）".into());
+    }
+    detect_image_mime(&bytes).ok_or("仅支持 PNG / JPEG / WebP / GIF 图片")?;
+    let dir = data_dir(&app)?;
+    tokio::fs::write(dir.join("wallpaper.img"), &bytes)
+        .await
+        .map_err(es)?;
+    let mut settings = Settings::load(&dir);
+    settings.wallpaper = Some("wallpaper.img".into());
+    settings.save(&dir)
+}
+
+#[tauri::command]
+async fn get_wallpaper(app: AppHandle) -> Result<Option<String>, String> {
+    let dir = data_dir(&app)?;
+    let settings = Settings::load(&dir);
+    let Some(name) = settings.wallpaper else {
+        return Ok(None);
+    };
+    let path = dir.join(&name);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = tokio::fs::read(path).await.map_err(es)?;
+    let mime = detect_image_mime(&bytes).ok_or("背景图格式异常，请重新设置")?;
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(Some(format!("data:{mime};base64,{b64}")))
+}
+
+#[tauri::command]
+async fn clear_wallpaper(app: AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app)?;
+    let mut settings = Settings::load(&dir);
+    if let Some(name) = settings.wallpaper.take() {
+        let _ = tokio::fs::remove_file(dir.join(name)).await;
+    }
+    settings.save(&dir)
+}
+
 /// 静默安装内置的官方 OpenVPN MSI（前置依赖，约 30-60s）。
 /// 要求当前进程有管理员权限（release 构建为 requireAdministrator）。
 #[tauri::command]
@@ -678,6 +839,88 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 托盘：动态图标（随状态变色）+ 菜单互斥 + 可隐藏
+// ---------------------------------------------------------------------------
+
+const TRAY_ID: &str = "main-tray";
+
+struct TrayItems {
+    connect: tauri::menu::MenuItem<tauri::Wry>,
+    disconnect: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+fn tray_status_text(status: &str) -> &str {
+    match status {
+        "connecting" => "连接中…",
+        "connected" => "已连接",
+        "failed" => "连接失败",
+        _ => "未连接",
+    }
+}
+
+/// 代码绘制托盘图标（32×32 RGBA 圆环，与主界面状态环同款配色）：
+/// idle 灰环 / connecting 黄环 / connected 绿环 + 中心点 / failed 红环。
+fn draw_tray_icon(status: &str) -> tauri::image::Image<'static> {
+    const S: usize = 32;
+    let (r, g, b) = match status {
+        "connected" => (0x34u8, 0xc7, 0x7b),
+        "connecting" => (0xf0, 0xb4, 0x29),
+        "failed" => (0xff, 0x7b, 0x72),
+        _ => (0x9a, 0xa7, 0xbf),
+    };
+    let mut buf = vec![0u8; S * S * 4];
+    let cx = (S as f32 - 1.0) / 2.0;
+    for y in 0..S {
+        for x in 0..S {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cx;
+            let d = (dx * dx + dy * dy).sqrt();
+            let idx = (y * S + x) * 4;
+            let mut alpha = 0.0f32;
+            // 圆环 9.5-13px，边缘 1px 线性抗锯齿
+            if (8.5..=13.5).contains(&d) {
+                alpha = 1.0 - (d - 8.5).abs().min((d - 13.5).abs()).clamp(0.0, 1.0);
+            }
+            // connected 加中心实心点（半径 5.5，同样 1px 抗锯齿）
+            if status == "connected" && d <= 6.5 {
+                alpha = alpha.max(1.0 - (6.5 - d).clamp(0.0, 1.0));
+            }
+            if alpha > 0.0 {
+                let a = (alpha * 255.0) as u8;
+                let prev = buf[idx + 3];
+                // 混合（中心点与环重叠处取较实者）
+                buf[idx] = r;
+                buf[idx + 1] = g;
+                buf[idx + 2] = b;
+                buf[idx + 3] = a.max(prev);
+            }
+        }
+    }
+    tauri::image::Image::new_owned(buf, S as u32, S as u32)
+}
+
+/// 按状态更新托盘：图标、tooltip、菜单连接/断开互斥。
+/// 托盘被用户隐藏时静默跳过（图标不存在）。
+fn update_tray(app: &AppHandle, status: &str) {
+    let text = tray_status_text(status);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_icon(Some(draw_tray_icon(status)));
+        let _ = tray.set_tooltip(Some(format!("SHU-VPN · {text}")));
+    }
+    let items = app.state::<TrayItems>();
+    let connected = matches!(status, "connected" | "connecting");
+    let _ = items.connect.set_enabled(!connected);
+    let _ = items.disconnect.set_enabled(connected);
+}
+
+/// 按设置应用托盘可见性（设置切换与启动时各调用一次）。
+fn apply_tray_visibility(app: &AppHandle, hide: bool) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_visible(!hide);
+    }
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
@@ -688,7 +931,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &connect, &disconnect, &quit])?;
 
-    let mut builder = TrayIconBuilder::with_id("main-tray")
+    app.manage(TrayItems {
+        connect: connect.clone(),
+        disconnect: disconnect.clone(),
+    });
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("SHU-VPN")
         .menu(&menu);
     if let Some(icon) = app.default_window_icon() {
@@ -720,6 +968,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
+    update_tray(app, "idle");
     Ok(())
 }
 
@@ -744,16 +993,39 @@ pub fn run() {
             install_openvpn,
             get_autostart,
             set_autostart,
+            set_wallpaper,
+            get_wallpaper,
+            clear_wallpaper,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
+            let handle = app.handle();
+            let hide_tray = match data_dir(handle) {
+                Ok(dir) => Settings::load(&dir).hide_tray,
+                Err(_) => false,
+            };
+            apply_tray_visibility(handle, hide_tray);
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关窗 = 最小化到托盘（保持连接与通知），退出走托盘菜单
+            // 托盘可见：关窗 = 最小化到托盘（保持连接与通知），退出走托盘菜单；
+            // 托盘被隐藏：关窗 = 直接退出（窗口藏起后没有入口可唤回）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+                let app = window.app_handle();
+                let hide_tray = match data_dir(app) {
+                    Ok(dir) => Settings::load(&dir).hide_tray,
+                    Err(_) => false,
+                };
+                if hide_tray {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = do_disconnect(app.clone()).await;
+                        app.exit(0);
+                    });
+                } else {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
         })
         .run(tauri::generate_context!())

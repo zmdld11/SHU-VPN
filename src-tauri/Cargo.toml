@@ -21,3 +21,4 @@ log = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 sha2 = "0.10"
+base64 = "0.22"
