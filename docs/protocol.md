@@ -195,6 +195,12 @@ period:  const\s+totalSeconds\s*=\s*(\d+)\s*;
 - **OTP 时效 30s**：连接发起前现取一个；断线重连、TLS 重协商触发重认证时重新取。
 - 若 `shu.ovpn` 带 `auth-nocache`，重协商时服务端会重新索要完整凭据，
   management 循环统一处理，无需特殊分支。
+- **hold 释放时序竞态**（实测 2.7.8 两种时序均出现过）：
+  `>HOLD` 实时通知可能在 management 客户端连上之前发出（永远收不到）；
+  而握手完成后立即 `hold release` 又可能早于 openvpn 主线程进入 hold 等待而被
+  丢弃（回 SUCCESS 但无效，随后 >HOLD 才到达，连接卡死）。正确做法：
+  收到 `>HOLD` 即释放 + 收不到时按短间隔（3s）补发，见到首个 `>STATE` 即停；
+  `hold release` 幂等，未在 hold 中也返回 SUCCESS，补发无害。
 
 ## 7. 安全与隐私
 

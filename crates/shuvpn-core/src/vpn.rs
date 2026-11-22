@@ -45,11 +45,13 @@ const MAX_AUTH_FAILURES: usize = 3;
 // 事件与状态
 // ---------------------------------------------------------------------------
 
-/// 连接等待的看门狗间隔（兜底释放 hold / 静默超时检查）。
-const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
+/// 连接等待的看门狗间隔（兜底释放 hold / 静默超时检查）。取短值是安全的：
+/// `hold release` 幂等（不在 hold 中也返回 SUCCESS），补发无害，而丢失的
+/// 单次释放会卡住整个启动（实测见 docs/protocol.md §6）。
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(3);
 
 /// 看门狗最多补发 hold release 的次数（避免异常场景无限循环）。
-const MAX_WATCHDOG_RELEASES: usize = 3;
+const MAX_WATCHDOG_RELEASES: usize = 5;
 
 /// 连接过程中对外广播的事件。
 #[derive(Debug, Clone)]
@@ -494,7 +496,10 @@ async fn supervise(
     let mut pending_dynamic: Option<DynamicChallenge> = None;
     let mut auth_failures = 0usize;
     let mut connected = false;
-    // 看门狗：若 openvpn 因版本/时序差异没有发出 >HOLD 通知，超时后兜底释放一次
+    // 见到首个 >STATE（RESOLVE 等）即说明 hold 已释放、连接在推进
+    let mut saw_state = false;
+    // 看门狗：>HOLD 通知可能在 management 客户端连上之前就发出（实测 2.7.8
+    // 两种时序均出现过），收不到时按短间隔补发 hold release，直至状态推进
     let mut watchdog_fires = 0usize;
     let watchdog = tokio::time::sleep(WATCHDOG_INTERVAL);
     tokio::pin!(watchdog);
@@ -518,6 +523,7 @@ async fn supervise(
                             }
                             MgmtEvent::State { name, reason } => {
                                 auth_failures = 0;
+                                saw_state = true;
                                 if name == "CONNECTED" {
                                     connected = true;
                                 }
@@ -613,8 +619,8 @@ async fn supervise(
                 let _ = writer.flush().await;
             }
             _ = &mut watchdog => {
-                if connected {
-                    // 已连接后静默属正常，不干预
+                if connected || saw_state {
+                    // hold 已释放（连接推进中/已建立），静默属正常，不干预
                     watchdog.as_mut().reset(tokio::time::Instant::now() + WATCHDOG_INTERVAL);
                     continue;
                 }
@@ -623,7 +629,7 @@ async fn supervise(
                     fail(&events, child, "连接启动超时：多次兜底释放 hold 后仍无进展").await;
                     break;
                 }
-                // 兜底：某些版本/时序下收不到 >HOLD，超时补发一次释放
+                // 兜底：>HOLD 未送达（attach 前已发出），按短间隔补发直至状态推进
                 let _ = writer.write_all(b"hold release\n").await;
                 let _ = writer.flush().await;
                 let _ = events.send(VpnEvent::Notice(format!(
