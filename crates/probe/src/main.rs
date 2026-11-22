@@ -45,7 +45,15 @@ async fn run(args: Vec<String>) -> Result<(), ExitCode> {
     match cmd {
         Some("login") => {
             let from_file = flag_value(&args, "--from-file");
-            cmd_login(from_file.as_deref()).await
+            let method_flag = match flag_value(&args, "--method").as_deref() {
+                Some("sms") => Some(TwoStepMethod::Sms),
+                Some("wecom") => Some(TwoStepMethod::Wecom),
+                Some(other) => {
+                    return Err(usage(&format!("--method 只接受 sms|wecom，得到 {other}")))
+                }
+                None => None,
+            };
+            cmd_login(from_file.as_deref(), method_flag).await
         }
         Some("verify") => {
             let code = flag_value(&args, "--code").ok_or_else(|| usage("--code <验证码> 必填"))?;
@@ -72,7 +80,9 @@ fn usage(msg: &str) -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("用法: shuvpn-probe <login [--from-file <json>] | verify --code <码> | otp>");
+    eprintln!(
+        "用法: shuvpn-probe <login [--from-file <json>] [--method sms|wecom] | verify --code <码> | otp>"
+    );
 }
 
 fn new_session() -> Result<Arc<ShuSession>, ExitCode> {
@@ -88,8 +98,12 @@ fn new_session() -> Result<Arc<ShuSession>, ExitCode> {
 // login
 // ---------------------------------------------------------------------------
 
-async fn cmd_login(from_file: Option<&str>) -> Result<(), ExitCode> {
+async fn cmd_login(
+    from_file: Option<&str>,
+    method_flag: Option<TwoStepMethod>,
+) -> Result<(), ExitCode> {
     let (username, password, preferred) = read_credentials(from_file)?;
+    let preferred = method_flag.or(preferred);
     let session = new_session()?;
     let params = otp_login_params();
 
@@ -107,17 +121,18 @@ async fn cmd_login(from_file: Option<&str>) -> Result<(), ExitCode> {
         return Ok(());
     }
 
-    // 选通道：文件指定 > 服务端可用通道里的 wecom > 服务端首个 > 默认 wecom
+    // 选通道：显式指定（--method / 文件 method 字段）> 可用通道里的 sms
+    //（用户偏好：短信比企微方便）> 服务端首个 > 默认 sms
     let method = preferred
         .filter(|m| resp.two_step_methods.contains(m))
         .or_else(|| {
             resp.two_step_methods
                 .iter()
-                .find(|m| **m == TwoStepMethod::Wecom)
+                .find(|m| **m == TwoStepMethod::Sms)
                 .copied()
         })
         .or_else(|| resp.two_step_methods.first().copied())
-        .unwrap_or(TwoStepMethod::Wecom);
+        .unwrap_or(TwoStepMethod::Sms);
     println!(
         "[2/2] 需要两步验证，可用通道: {:?}，选用 {:?}",
         resp.two_step_methods, method
