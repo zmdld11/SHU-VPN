@@ -14,3 +14,4 @@ shuvpn-core = { path = "../shuvpn-core" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 rpassword = "7"
+async-trait = { workspace = true }

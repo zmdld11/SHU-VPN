@@ -14,5 +14,6 @@ pub mod otp;
 pub mod secrets;
 pub mod session;
 pub mod sso;
+pub mod vpn;
 
 pub use error::{CoreError, Result, TwoStepMethod};
