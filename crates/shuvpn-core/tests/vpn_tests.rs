@@ -201,3 +201,43 @@ fn cr_response_encodes_otp() {
     // "123456" → MTIzNDU2
     assert_eq!(cr_response_line("123456"), "cr-response MTIzNDU2");
 }
+
+// ---------------------------------------------------------------------------
+// PUSH_REPLY 路由解析（分流模式网段学习）
+// ---------------------------------------------------------------------------
+
+use shuvpn_core::vpn::parse_push_routes;
+
+#[test]
+fn push_routes_parses_school_nets() {
+    // 模拟真实 PUSH_REPLY：校内段 + dhcp-option + redirect-gateway def1 展开的默认路由
+    let line = ">LOG:1763780000,I,PUSH: Received control message: 'PUSH_REPLY,route 10.60.0.0 255.255.0.0,route 172.16.0.0 255.240.0.0 vpn_gateway,dhcp-option DNS 10.10.10.10,redirect-gateway def1,route 0.0.0.0 128.0.0.0,route 128.0.0.0 128.0.0.0'";
+    let routes = parse_push_routes(line);
+    assert_eq!(
+        routes,
+        vec![
+            ("10.60.0.0".to_string(), "255.255.0.0".to_string()),
+            ("172.16.0.0".to_string(), "255.240.0.0".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn push_routes_accepts_stdout_prefix_and_ignores_other_lines() {
+    assert_eq!(
+        parse_push_routes("[out] PUSH: Received control message: 'PUSH_REPLY,route 10.1.2.0 255.255.255.0'"),
+        vec![("10.1.2.0".to_string(), "255.255.255.0".to_string())]
+    );
+    assert!(parse_push_routes(">LOG:1,I,Initialization Sequence Completed").is_empty());
+    assert!(parse_push_routes("").is_empty());
+}
+
+#[test]
+fn push_routes_handles_truncated_line() {
+    // 行尾引号缺失（截断）时条目仍应完整解析
+    let line = "PUSH: Received control message: 'PUSH_REPLY,route 10.7.0.0 255.0.0.0";
+    assert_eq!(
+        parse_push_routes(line),
+        vec![("10.7.0.0".to_string(), "255.0.0.0".to_string())]
+    );
+}

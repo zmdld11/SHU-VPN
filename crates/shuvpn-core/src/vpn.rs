@@ -65,6 +65,11 @@ pub enum VpnEvent {
     Log(String),
     /// 需要用户关注的通知（如 SSO 会话失效）。
     Notice(String),
+    /// 服务器推送的路由条目（分流模式的校内网段自动学习用）。
+    RoutePushed {
+        net: String,
+        mask: String,
+    },
 }
 
 impl VpnEvent {
@@ -241,6 +246,37 @@ fn quoted(s: &str) -> String {
     format!("\"{}\"", escape_mgmt(s))
 }
 
+/// 从日志行解析 PUSH_REPLY 中的 route 条目，返回 (net, mask) 列表。
+///
+/// 兼容两种载体：management `>LOG` 消息体与子进程 stdout 原文（`[out] ` 前缀）。
+/// 过滤 redirect-gateway（def1）展开的两条默认路由（0.0.0.0/1 与 128.0.0.0/1）——
+/// 分流模式正是不想要它们；其余条目即校内网段。
+pub fn parse_push_routes(line: &str) -> Vec<(String, String)> {
+    const MARKER: &str = "PUSH: Received control message: 'PUSH_REPLY,";
+    let Some(pos) = line.find(MARKER) else {
+        return Vec::new();
+    };
+    let payload = &line[pos + MARKER.len()..];
+    // 行尾可能带着 PUSH_REPLY 的收尾引号（若日志行截断则取到行尾，条目仍完整）
+    let payload = payload.trim_end_matches('\'');
+    payload
+        .split(',')
+        .filter_map(|part| {
+            let mut it = part.split_whitespace();
+            if it.next() != Some("route") {
+                return None;
+            }
+            let net = it.next()?;
+            let mask = it.next()?;
+            // def1 默认路由两条：仅接管公网，不属于校内网段
+            if mask == "128.0.0.0" && (net == "0.0.0.0" || net == "128.0.0.0") {
+                return None;
+            }
+            Some((net.to_string(), mask.to_string()))
+        })
+        .collect()
+}
+
 /// 构造对 `Need 'Auth'` 的应答命令序列。
 ///
 /// - `dynamic`（CRV1）优先：应答 `password "Auth" "CRV1:<flags>:<opaque>:<b64用户名>:<口令>"`，
@@ -338,6 +374,11 @@ pub trait AuthSource: Send + Sync {
 pub struct VpnConfig {
     pub openvpn_path: PathBuf,
     pub config_path: PathBuf,
+    /// 分流模式：忽略服务器推送的全部路由（含默认路由接管）。
+    /// 会话保持、内网通过 [`VpnConfig::extra_routes`] 显式指路。
+    pub route_nopull: bool,
+    /// 分流模式附加路由 (net, mask)，经 vpn_gateway 指向隧道。
+    pub extra_routes: Vec<(String, String)>,
 }
 
 impl VpnConfig {
@@ -345,6 +386,8 @@ impl VpnConfig {
         Self {
             openvpn_path: PathBuf::from(DEFAULT_OPENVPN_PATH),
             config_path: config_path.into(),
+            route_nopull: false,
+            extra_routes: Vec::new(),
         }
     }
 }
@@ -402,6 +445,14 @@ pub async fn launch(
 
     let port = free_mgmt_port()?;
     let mut cmd = Command::new(&cfg.openvpn_path);
+    if cfg.route_nopull {
+        // 分流模式：忽略服务器推送路由（默认路由不再被接管），改为对学习到的
+        // 校内网段逐条显式指路（vpn_gateway = 隧道网关，openvpn 原生关键字）
+        cmd.arg("--route-nopull");
+        for (net, mask) in &cfg.extra_routes {
+            cmd.arg("--route").arg(net).arg(mask).arg("vpn_gateway");
+        }
+    }
     cmd.args([
         "--config",
         &cfg.config_path.to_string_lossy(),
@@ -432,12 +483,16 @@ pub async fn launch(
         .spawn()
         .map_err(|e| CoreError::Protocol(format!("openvpn 启动失败: {e}")))?;
 
-    // 子进程输出转发为日志事件（路由/TAP/权限错误都出现在这里）
+    // 子进程输出转发为日志事件（路由/TAP/权限错误都出现在这里）；
+    // PUSH_REPLY 路由条目同时作为网段学习事件广播（分流模式）
     if let Some(stdout) = child.stdout.take() {
         let ev = events.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                for (net, mask) in parse_push_routes(&line) {
+                    let _ = ev.send(VpnEvent::RoutePushed { net, mask });
+                }
                 let _ = ev.send(VpnEvent::Log(format!("[out] {line}")));
             }
         });
@@ -592,6 +647,9 @@ async fn supervise(
                                 break;
                             }
                             MgmtEvent::Log(msg) => {
+                                for (net, mask) in parse_push_routes(&msg) {
+                                    let _ = events.send(VpnEvent::RoutePushed { net, mask });
+                                }
                                 let _ = events.send(VpnEvent::Log(msg));
                             }
                             MgmtEvent::Info(msg) => {

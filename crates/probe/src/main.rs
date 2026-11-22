@@ -456,6 +456,9 @@ async fn cmd_connect(config: Option<String>) -> Result<(), ExitCode> {
             },
             Some(VpnEvent::Log(l)) => println!("  [log] {l}"),
             Some(VpnEvent::Notice(n)) => println!("  [!] {n}"),
+            Some(VpnEvent::RoutePushed { net, mask }) => {
+                println!("  [route] {net} {mask}");
+            }
             None => {
                 eprintln!("✗ openvpn 进程提前退出");
                 return Err(ExitCode::from(2));
@@ -477,6 +480,7 @@ async fn cmd_connect(config: Option<String>) -> Result<(), ExitCode> {
                 }
                 VpnEvent::Log(l) => println!("  [log] {l}"),
                 VpnEvent::Notice(n) => println!("  [!] {n}"),
+                VpnEvent::RoutePushed { net, mask } => println!("  [route] {net} {mask}"),
             }
         }
     });
