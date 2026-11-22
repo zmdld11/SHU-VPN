@@ -66,10 +66,7 @@ pub enum VpnEvent {
     /// 需要用户关注的通知（如 SSO 会话失效）。
     Notice(String),
     /// 服务器推送的路由条目（分流模式的校内网段自动学习用）。
-    RoutePushed {
-        net: String,
-        mask: String,
-    },
+    RoutePushed { net: String, mask: String },
 }
 
 impl VpnEvent {

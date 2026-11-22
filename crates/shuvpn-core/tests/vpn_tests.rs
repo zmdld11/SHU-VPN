@@ -225,7 +225,9 @@ fn push_routes_parses_school_nets() {
 #[test]
 fn push_routes_accepts_stdout_prefix_and_ignores_other_lines() {
     assert_eq!(
-        parse_push_routes("[out] PUSH: Received control message: 'PUSH_REPLY,route 10.1.2.0 255.255.255.0'"),
+        parse_push_routes(
+            "[out] PUSH: Received control message: 'PUSH_REPLY,route 10.1.2.0 255.255.255.0'"
+        ),
         vec![("10.1.2.0".to_string(), "255.255.255.0".to_string())]
     );
     assert!(parse_push_routes(">LOG:1,I,Initialization Sequence Completed").is_empty());

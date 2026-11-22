@@ -341,15 +341,11 @@ async fn connect_inner(app: &AppHandle) -> Result<(), String> {
         let routes = load_learned_routes(&dir);
         if routes.is_empty() {
             return Err(
-                "分流模式需要先正常（全局）连接一次以学习校内网段，请关闭分流后连接一次"
-                    .into(),
+                "分流模式需要先正常（全局）连接一次以学习校内网段，请关闭分流后连接一次".into(),
             );
         }
         cfg.route_nopull = true;
-        cfg.extra_routes = routes
-            .into_iter()
-            .map(|r| (r.net, r.mask))
-            .collect();
+        cfg.extra_routes = routes.into_iter().map(|r| (r.net, r.mask)).collect();
         emit(
             app,
             UiEvent::Progress {
@@ -993,12 +989,7 @@ fn apply_tray_visibility(app: &AppHandle, hide: bool) {
 
 /// 按当前状态切换连接：未连接/失败 → 连接；连接中/已连接 → 断开。
 async fn toggle_connect(app: AppHandle) {
-    let status = app
-        .state::<AppState>()
-        .status
-        .lock()
-        .unwrap()
-        .clone();
+    let status = app.state::<AppState>().status.lock().unwrap().clone();
     let res = match status.as_str() {
         "connected" | "connecting" => do_disconnect(app.clone()).await,
         _ => do_connect(app.clone()).await,
