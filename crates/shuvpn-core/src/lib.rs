@@ -12,6 +12,7 @@
 pub mod error;
 pub mod otp;
 pub mod secrets;
+pub mod session;
 pub mod sso;
 
-pub use error::{CoreError, Result};
+pub use error::{CoreError, Result, TwoStepMethod};
