@@ -107,9 +107,15 @@ async fn cmd_login(from_file: Option<&str>) -> Result<(), ExitCode> {
         return Ok(());
     }
 
-    // 选通道：文件指定 > twoStepMethods 首个可用 > 默认 wecom
+    // 选通道：文件指定 > 服务端可用通道里的 wecom > 服务端首个 > 默认 wecom
     let method = preferred
         .filter(|m| resp.two_step_methods.contains(m))
+        .or_else(|| {
+            resp.two_step_methods
+                .iter()
+                .find(|m| **m == TwoStepMethod::Wecom)
+                .copied()
+        })
         .or_else(|| resp.two_step_methods.first().copied())
         .unwrap_or(TwoStepMethod::Wecom);
     println!(
@@ -161,7 +167,10 @@ fn read_credentials(
     }
 
     let username = prompt("学号/工号: ");
-    let password = rpassword::prompt_password("密码（不回显）: ").unwrap_or_default();
+    // 提示语走 stdout（PS 对 stderr 按控制台代码页解码会乱码），rpassword 只静默读
+    print!("密码（不回显）: ");
+    let _ = std::io::stdout().flush();
+    let password = rpassword::read_password().unwrap_or_default();
     if username.is_empty() || password.is_empty() {
         return Err(usage("学号与密码不能为空"));
     }
