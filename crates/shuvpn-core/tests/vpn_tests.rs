@@ -104,6 +104,14 @@ fn parse_verification_failed_plain() {
 }
 
 #[test]
+fn parse_hold_notification() {
+    assert!(matches!(
+        parse_mgmt_line(">HOLD:Waiting for hold release:0"),
+        MgmtEvent::Hold
+    ));
+}
+
+#[test]
 fn parse_non_realtime_line_is_other() {
     assert!(matches!(
         parse_mgmt_line("SUCCESS: log on"),
