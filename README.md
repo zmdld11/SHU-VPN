@@ -39,12 +39,12 @@ OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：*
 
 | 里程碑 | Issue | 状态 |
 | :-- | :-- | :-- |
-| 脚手架（workspace / CI / 打包） | #1 | 🚧 进行中 |
-| core-SSO（登录 / 2FA / 授权） | #2 | ⏳ |
-| core-OTP（预热 / 取码） | #3 | ⏳ |
-| probe 真实联调 | #4 | ⏳ |
-| 桌面 VPN 管理（management 接口） | #5 | ⏳ |
-| UI + v0.1 发布 | #6 | ⏳ |
+| 脚手架（workspace / CI / 打包） | #1 | ✅ |
+| core-SSO（登录 / 2FA / 授权） | #2 | ✅ |
+| core-OTP（预热 / 取码） | #3 | ✅ |
+| probe 真实联调 | #4 | ✅ |
+| 桌面 VPN 管理（management 接口） | #5 | ✅ 实测 CONNECTED |
+| UI + v0.1 发布 | #6 | 🚧 进行中 |
 
 ## 配置来源
 
