@@ -1,0 +1,75 @@
+# SHU-VPN
+
+上海大学（SHU）OpenVPN 特供客户端：把「学号密码 + 每周一次的系统登录 + OTP 令牌手动复制」
+全部自动化，只保留一个轻量、正常的界面。
+
+## 它解决什么
+
+学校 VPN 更新后连接流程变成：
+
+> 导入 shu.ovpn → 输学号密码 → （约每周一次）登录统一身份认证 →
+> （需要时）输入发送到企业微信/手机的验证码 → 打开 OTP 令牌站复制 6 位口令 → 粘回 VPN 客户端
+
+SHU-VPN 把中间所有环节自动化：SSO 会话静默续期、验证码自动触发发送（用户只输入收到的码）、
+OTP 令牌自动抓取并程序化提交给 openvpn.exe。用户操作只剩：**点连接（偶尔输一次验证码）**。
+
+## 架构
+
+```
+┌────────────────────────── SHU-VPN (Tauri 2) ──────────────────────────┐
+│  ui/            Vue 3 界面（状态 / 日志 / 验证码弹窗 / 设置）          │
+│  src-tauri/     桌面壳：托盘常驻、通知、openvpn.exe 进程与             │
+│                 management 接口（账密 + static-challenge 应答）        │
+│  crates/                                                        │
+│   ├── shuvpn-core/   协议核心（无 UI 依赖，未来安卓伴侣模式复用）      │
+│   │     ├── sso.rs      SSO 登录 / 2FA / OAuth2 授权                  │
+│   │     ├── otp.rs      OTP 令牌站取码                                │
+│   │     └── secrets.rs  凭据存储抽象（桌面: Windows 凭据管理器）       │
+│   └── probe/         联调探测 CLI                                     │
+└───────────────────────────────────────────────────────────────────────┘
+        │                                │
+        ▼                                ▼
+  newsso.shu.edu.cn                openvpn.exe（复用已装社区版）
+  otp.shu.edu.cn                   （TAP/驱动由社区版安装器负责）
+```
+
+协议细节见 [docs/protocol.md](docs/protocol.md)。
+
+## 状态
+
+| 里程碑 | Issue | 状态 |
+| :-- | :-- | :-- |
+| 脚手架（workspace / CI / 打包） | #1 | 🚧 进行中 |
+| core-SSO（登录 / 2FA / 授权） | #2 | ⏳ |
+| core-OTP（预热 / 取码） | #3 | ⏳ |
+| probe 真实联调 | #4 | ⏳ |
+| 桌面 VPN 管理（management 接口） | #5 | ⏳ |
+| UI + v0.1 发布 | #6 | ⏳ |
+
+## 开发
+
+前置依赖：Rust (MSVC)、Node.js ≥ 20、WebView2（Win11 自带）、已安装 OpenVPN 社区版。
+
+```bash
+npm install && npm install --prefix ui   # 安装前端依赖（根 + ui）
+npm run tauri dev                        # 本地开发
+cargo test --workspace                   # 协议层单测（离线 mock）
+cargo clippy --workspace -- -D warnings  # 静态检查
+npm run tauri build                      # 打 NSIS 安装包
+```
+
+## 免责声明
+
+本项目仅供个人学习与研究，用于自动化**本人账号**的登录流程，不绕过任何认证环节
+（验证码仍需本人输入）。使用请遵守学校相关规定；接口随学校系统升级可能失效。
+
+## 致谢
+
+协议链路的公开分析参考（均为独立实现，未复用代码）：
+[preca-hoshino/shu-sso-poc](https://github.com/preca-hoshino/shu-sso-poc) ·
+[preca-hoshino/shu-otp-poc](https://github.com/preca-hoshino/shu-otp-poc) ·
+[BlueFisher/SHU-selfreport](https://github.com/BlueFisher/SHU-selfreport)
+
+## License
+
+[MIT](LICENSE)

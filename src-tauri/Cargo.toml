@@ -1,0 +1,20 @@
+[package]
+name = "shu-vpn"
+description = "上海大学 OpenVPN 特供客户端（桌面壳）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "shu_vpn_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+shuvpn-core = { path = "../crates/shuvpn-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

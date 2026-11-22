@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend deps
+        run: |
+          npm install
+          npm install --prefix ui
+
+      - name: Build & bundle (NSIS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "SHU-VPN v__VERSION__"
+          releaseBody: "下载 SHU-VPN_x.y.z_x64-setup.exe 安装；需已安装 OpenVPN 社区版。"
+          releaseDraft: true
+          prerelease: false

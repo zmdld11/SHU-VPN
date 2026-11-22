@@ -1,0 +1,14 @@
+[package]
+name = "probe"
+description = "SHU-VPN 联调探测 CLI：真实环境验证协议链路（凭据只进内存）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "shuvpn-probe"
+path = "src/main.rs"
+
+[dependencies]
+shuvpn-core = { path = "../shuvpn-core" }
+tokio = { workspace = true }

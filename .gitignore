@@ -1,0 +1,26 @@
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+ui/dist/
+ui/node_modules/
+
+# 敏感产物 —— 严禁入库（ovpn 配置含服务器信息，凭据/会话绝不入库）
+*.ovpn
+*.pem
+*.key
+captures/
+.credentials*
+*session*.json
+cookie*.json
+.env
+.env.*
+
+# IDE / 系统杂项
+.vscode/
+.idea/
+*.swp
+Thumbs.db
