@@ -243,3 +243,72 @@ fn push_routes_handles_truncated_line() {
         vec![("10.7.0.0".to_string(), "255.0.0.0".to_string())]
     );
 }
+
+// ---------------------------------------------------------------------------
+// 自定义规则文件解析（分流模式附加路由）
+// ---------------------------------------------------------------------------
+
+use shuvpn_core::vpn::{parse_custom_rules, prefix_to_mask, CustomRules};
+
+#[test]
+fn prefix_to_mask_values() {
+    assert_eq!(prefix_to_mask(0).unwrap(), "0.0.0.0");
+    assert_eq!(prefix_to_mask(8).unwrap(), "255.0.0.0");
+    assert_eq!(prefix_to_mask(16).unwrap(), "255.255.0.0");
+    assert_eq!(prefix_to_mask(24).unwrap(), "255.255.255.0");
+    assert_eq!(prefix_to_mask(32).unwrap(), "255.255.255.255");
+    assert!(prefix_to_mask(33).is_none());
+}
+
+#[test]
+fn custom_rules_parses_all_forms() {
+    let text = "# 注释行\n\
+                10.60.0.0/16\n\
+                172.20.3.0 255.255.255.0\n\
+                route 192.168.7.0 255.255.255.0\n\
+                HOST CNKI.net\n\
+                \n\
+                host web.library.shu.edu.cn\n";
+    let r = parse_custom_rules(text);
+    assert_eq!(
+        r.routes,
+        vec![
+            ("10.60.0.0".to_string(), "255.255.0.0".to_string()),
+            ("172.20.3.0".to_string(), "255.255.255.0".to_string()),
+            ("192.168.7.0".to_string(), "255.255.255.0".to_string()),
+        ]
+    );
+    assert_eq!(r.hosts, vec!["cnki.net", "web.library.shu.edu.cn"]);
+    assert!(r.errors.is_empty());
+}
+
+#[test]
+fn custom_rules_reports_bad_lines_with_numbers() {
+    let text = "10.0.0.0/8\n\
+                999.1.2.3/24\n\
+                10.2.0.0/33\n\
+                HOST notadomain\n\
+                10.3.0.0\n\
+                route 10.4.0.0 255.0.0.0 extra\n\
+                HOST\n";
+    let r = parse_custom_rules(text);
+    // 合法行不受非法行影响
+    assert_eq!(r.routes.len(), 1);
+    assert!(r.hosts.is_empty());
+    assert_eq!(r.errors.len(), 6);
+    assert!(r.errors[0].contains("第2行"));
+    assert!(r.errors[1].contains("第3行"));
+    assert!(r.errors[5].contains("第7行"));
+}
+
+#[test]
+fn custom_rules_empty_and_inline_comment() {
+    assert_eq!(parse_custom_rules(""), CustomRules::default());
+    assert_eq!(
+        parse_custom_rules("   \n#only comment\n"),
+        CustomRules::default()
+    );
+    let r = parse_custom_rules("10.9.0.0/16 # 行内注释");
+    assert_eq!(r.routes.len(), 1);
+    assert!(r.errors.is_empty());
+}

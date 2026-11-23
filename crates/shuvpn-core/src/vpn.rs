@@ -274,6 +274,138 @@ pub fn parse_push_routes(line: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 用户自定义规则文件的解析结果。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CustomRules {
+    /// 路由规则 (net, mask)，点分掩码。
+    pub routes: Vec<(String, String)>,
+    /// 域名规则（连接时解析为 /32 路由）。
+    pub hosts: Vec<String>,
+    /// 非法行（带行号），不中断合法行的解析。
+    pub errors: Vec<String>,
+}
+
+/// `/prefix` → 点分掩码（如 16 → "255.255.0.0"）。prefix 超 32 无效。
+pub fn prefix_to_mask(prefix: u8) -> Option<String> {
+    if prefix > 32 {
+        return None;
+    }
+    let bits = if prefix == 0 {
+        0
+    } else {
+        0xFFFF_FFFFu32 << (32 - prefix)
+    };
+    Some(format!(
+        "{}.{}.{}.{}",
+        (bits >> 24) & 0xFF,
+        (bits >> 16) & 0xFF,
+        (bits >> 8) & 0xFF,
+        bits & 0xFF
+    ))
+}
+
+/// 校验点分十进制四段（每段 0-255），返回 None 表示非法。
+fn valid_ipv4_octets(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 3
+                && p.chars().all(|c| c.is_ascii_digit())
+                && p.parse::<u16>().map(|v| v <= 255).unwrap_or(false)
+        })
+}
+
+/// 解析用户自定义规则文件（分流模式附加路由）。
+///
+/// 每行一种规则，`#` 注释、空行忽略：
+/// - `a.b.c.d/prefix`（如 `10.60.0.0/16`）
+/// - `a.b.c.d 点分掩码`（空格分隔，如 `10.60.0.0 255.255.0.0`）
+/// - `route a.b.c.d 点分掩码`（OpenVPN 风格，route 关键字可选）
+/// - `HOST 域名`（大小写不敏感；连接时解析为 /32 路由）
+///
+/// 非法行记入 [`CustomRules::errors`]（带 1-based 行号），不影响其余行。
+pub fn parse_custom_rules(text: &str) -> CustomRules {
+    let mut out = CustomRules::default();
+    for (idx, raw) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let first = it.next().unwrap_or("");
+        // HOST 域名规则（host 大小写不敏感）
+        if first.eq_ignore_ascii_case("host") {
+            let Some(domain) = it.next() else {
+                out.errors.push(format!("第{line_no}行: HOST 缺少域名"));
+                continue;
+            };
+            let domain_ok = !domain.contains('#')
+                && domain
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c))
+                && domain.contains('.');
+            if !domain_ok || it.next().is_some() {
+                out.errors
+                    .push(format!("第{line_no}行: HOST 域名格式无效（{domain}）"));
+                continue;
+            }
+            out.hosts.push(domain.to_ascii_lowercase());
+            continue;
+        }
+        // 路由规则：`net/prefix` | `net mask` | `route net mask`
+        let mut toks: Vec<&str> = it.collect();
+        let nettok = if first.eq_ignore_ascii_case("route") {
+            let Some(t) = toks.first().copied() else {
+                out.errors.push(format!("第{line_no}行: 缺少 IP"));
+                continue;
+            };
+            toks.remove(0);
+            t
+        } else {
+            first
+        };
+        // net 可带内联前缀（`a.b.c.d/prefix`）
+        let (net, inline_prefix) = match nettok.split_once('/') {
+            Some((n, p)) => (n, Some(p)),
+            None => (nettok, None),
+        };
+        if !valid_ipv4_octets(net) {
+            out.errors.push(format!("第{line_no}行: IP 无效（{net}）"));
+            continue;
+        }
+        let mask = if let Some(p) = inline_prefix {
+            if !toks.is_empty() {
+                out.errors.push(format!("第{line_no}行: 参数过多"));
+                continue;
+            }
+            let Some(m) = p.parse::<u8>().ok().and_then(prefix_to_mask) else {
+                out.errors
+                    .push(format!("第{line_no}行: 前缀长度无效（/{p}）"));
+                continue;
+            };
+            m
+        } else {
+            let Some(m) = toks.first().copied() else {
+                out.errors.push(format!("第{line_no}行: 缺少掩码"));
+                continue;
+            };
+            if toks.len() > 1 {
+                out.errors.push(format!("第{line_no}行: 参数过多"));
+                continue;
+            }
+            if !valid_ipv4_octets(m) {
+                out.errors.push(format!("第{line_no}行: 掩码无效（{m}）"));
+                continue;
+            }
+            m.to_string()
+        };
+        out.routes.push((net.to_string(), mask));
+    }
+    out
+}
+
 /// 构造对 `Need 'Auth'` 的应答命令序列。
 ///
 /// - `dynamic`（CRV1）优先：应答 `password "Auth" "CRV1:<flags>:<opaque>:<b64用户名>:<口令>"`，
