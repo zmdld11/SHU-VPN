@@ -336,20 +336,70 @@ async fn connect_inner(app: &AppHandle) -> Result<(), String> {
         cfg.openvpn_path = PathBuf::from(custom);
     }
     if settings.split_tunnel {
-        // 分流模式：忽略服务器推送路由，用学习到的校内网段显式指路。
-        // 没学过网段（从未全局连接成功过）则拒绝，避免空分流。
-        let routes = load_learned_routes(&dir);
-        if routes.is_empty() {
+        // 分流模式：忽略服务器推送路由，显式指路（学习网段 ∪ 自定义规则）
+        let mut merged: std::collections::BTreeSet<(String, String)> = load_learned_routes(&dir)
+            .into_iter()
+            .map(|r| (r.net, r.mask))
+            .collect();
+        let learned_n = merged.len();
+
+        // 自定义规则：CIDR 直接并入；HOST 连接时解析为 /32 路由（失败跳过）
+        let rules_text = tokio::fs::read_to_string(rules_path(&dir))
+            .await
+            .unwrap_or_default();
+        let rules = vpn::parse_custom_rules(&rules_text);
+        for e in &rules.errors {
+            emit(
+                app,
+                UiEvent::Notice {
+                    text: format!("自定义规则 {e}（已跳过）"),
+                },
+            );
+        }
+        merged.extend(rules.routes.iter().cloned());
+        let mut hosts_resolved = 0usize;
+        let mut hosts_failed = 0usize;
+        for host in &rules.hosts {
+            match tokio::net::lookup_host((host.as_str(), 80)).await {
+                Ok(addrs) => {
+                    let ips: std::collections::BTreeSet<String> = addrs
+                        .filter_map(|a| match a {
+                            std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    for ip in ips {
+                        merged.insert((ip, "255.255.255.255".into()));
+                    }
+                    hosts_resolved += 1;
+                }
+                Err(_) => {
+                    hosts_failed += 1;
+                    emit(
+                        app,
+                        UiEvent::Notice {
+                            text: format!("自定义规则域名解析失败：{host}（已跳过）"),
+                        },
+                    );
+                }
+            }
+        }
+        let custom_n = rules.routes.len();
+
+        if merged.is_empty() {
             return Err(
-                "分流模式需要先正常（全局）连接一次以学习校内网段，请关闭分流后连接一次".into(),
+                "分流模式需要网段来源：请先全局连接一次学习校内网段，或在设置中添加自定义规则"
+                    .into(),
             );
         }
         cfg.route_nopull = true;
-        cfg.extra_routes = routes.into_iter().map(|r| (r.net, r.mask)).collect();
+        cfg.extra_routes = merged.into_iter().collect();
         emit(
             app,
             UiEvent::Progress {
-                text: "分流模式：仅校内网段走 VPN，其余流量直连".into(),
+                text: format!(
+                    "分流模式：仅指定网段走 VPN，其余直连（学习 {learned_n} + 自定义 {custom_n} 条路由，域名解析 {hosts_resolved} 成功/{hosts_failed} 失败）"
+                ),
             },
         );
     }
@@ -551,6 +601,11 @@ struct StatusInfo {
 /// 分流模式网段缓存（连接时从 PUSH_REPLY 学习，见 VpnEvent::RoutePushed）。
 fn routes_path(dir: &Path) -> PathBuf {
     dir.join("routes.json")
+}
+
+/// 用户自定义规则文件（分流模式附加路由，见 vpn::parse_custom_rules）。
+fn rules_path(dir: &Path) -> PathBuf {
+    dir.join("custom-rules.txt")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -916,6 +971,44 @@ async fn clear_wallpaper(app: AppHandle) -> Result<(), String> {
     settings.save(&dir)
 }
 
+// ---------------------------------------------------------------------------
+// 自定义规则文件（分流模式附加路由）
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RulesParseResult {
+    routes: usize,
+    hosts: usize,
+    errors: Vec<String>,
+}
+
+#[tauri::command]
+async fn get_custom_rules(app: AppHandle) -> Result<String, String> {
+    let dir = data_dir(&app)?;
+    Ok(tokio::fs::read_to_string(rules_path(&dir))
+        .await
+        .unwrap_or_default())
+}
+
+/// 保存规则文件并返回解析摘要（含错误行，供 UI 内联回显）。重连后生效。
+#[tauri::command]
+async fn save_custom_rules(app: AppHandle, text: String) -> Result<RulesParseResult, String> {
+    if text.len() > 256 * 1024 {
+        return Err("规则文件过大（上限 256KB）".into());
+    }
+    let dir = data_dir(&app)?;
+    tokio::fs::write(rules_path(&dir), &text)
+        .await
+        .map_err(es)?;
+    let parsed = vpn::parse_custom_rules(&text);
+    Ok(RulesParseResult {
+        routes: parsed.routes.len(),
+        hosts: parsed.hosts.len(),
+        errors: parsed.errors,
+    })
+}
+
 /// 静默安装内置的官方 OpenVPN MSI（前置依赖，约 30-60s）。
 /// 要求当前进程有管理员权限（release 构建为 requireAdministrator）。
 #[tauri::command]
@@ -1193,6 +1286,8 @@ pub fn run() {
             set_wallpaper,
             get_wallpaper,
             clear_wallpaper,
+            get_custom_rules,
+            save_custom_rules,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
