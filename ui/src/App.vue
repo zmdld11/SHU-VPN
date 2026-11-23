@@ -68,6 +68,10 @@ const autostartBusy = ref(false);
 const wallpaperUrl = ref("");
 const wallInput = ref<HTMLInputElement | null>(null);
 
+// 自定义规则文件（分流模式附加路由；后端解析校验）
+const rulesText = ref("");
+const rulesSummary = ref("");
+
 /** 有背景图时叠加深色渐变遮罩（保证文字可读），无图时保持默认毛玻璃 */
 const shellStyle = computed(() =>
   wallpaperUrl.value
@@ -402,6 +406,37 @@ async function clearWallpaper(): Promise<void> {
     log(String(e));
   }
 }
+
+async function loadRules(): Promise<void> {
+  try {
+    rulesText.value = await invoke<string>("get_custom_rules");
+    rulesSummary.value = "";
+  } catch (e) {
+    log("读取规则失败: " + String(e));
+  }
+}
+
+function openSettings(): void {
+  showSettings.value = true;
+  loadRules();
+}
+
+async function saveRules(): Promise<void> {
+  try {
+    const r = await invoke<{ routes: number; hosts: number; errors: string[] }>(
+      "save_custom_rules",
+      { text: rulesText.value },
+    );
+    r.errors.forEach((e) => log("⚠ 自定义规则 " + e + "（已跳过）"));
+    rulesSummary.value =
+      `${r.routes} 条网段 · ${r.hosts} 个域名` +
+      (r.errors.length ? ` · ${r.errors.length} 条无效` : " · 格式正确") +
+      " · 重连后生效";
+    log("✓ 自定义规则已保存（重连后生效）");
+  } catch (e) {
+    log("✗ 保存规则失败: " + String(e));
+  }
+}
 </script>
 
 <template>
@@ -488,7 +523,7 @@ async function clearWallpaper(): Promise<void> {
 
       <!-- 底部工具行 -->
       <footer class="dock">
-        <button class="dock-btn" @click="showSettings = true">
+        <button class="dock-btn" @click="openSettings">
           <svg viewBox="0 0 16 16">
             <circle cx="8" cy="8" r="2.2" />
             <path
@@ -643,6 +678,21 @@ async function clearWallpaper(): Promise<void> {
             @keyup.enter="saveHotkey($event)"
             @blur="saveHotkey($event)"
           />
+        </div>
+
+        <div class="field">
+          <label>自定义规则（分流模式附加，重连生效；每行一条：CIDR 网段 / HOST 域名，# 注释）</label>
+          <textarea
+            v-model="rulesText"
+            class="rules-area"
+            rows="6"
+            spellcheck="false"
+            placeholder="10.60.0.0/16&#10;10.7.0.0 255.0.0.0&#10;HOST cnki.net"
+          ></textarea>
+          <div class="rules-row">
+            <button class="ghost wall-btn" @click="saveRules">保存规则</button>
+            <span class="rules-summary">{{ rulesSummary || "仅在分流模式下生效" }}</span>
+          </div>
         </div>
 
         <div class="field">
@@ -1253,5 +1303,32 @@ button {
 }
 .hk-input:focus {
   border-color: #3b82f6;
+}
+.rules-area {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid #33415e;
+  background: rgba(0, 0, 0, 0.3);
+  color: #e9eef7;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  outline: none;
+  resize: vertical;
+  user-select: text;
+}
+.rules-area:focus {
+  border-color: #3b82f6;
+}
+.rules-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.rules-summary {
+  font-size: 11.5px;
+  color: #7e8cab;
 }
 </style>
