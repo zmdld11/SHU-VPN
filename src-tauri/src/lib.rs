@@ -711,31 +711,120 @@ async fn get_autostart() -> Result<bool, String> {
         .success())
 }
 
+/// 自启任务动作携带的参数：登录启动时窗口保持隐藏（静默驻留托盘）。
+pub const AUTOSTART_ARG: &str = "--hidden";
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// schtasks /query /xml 的输出是 UTF-16LE（带 BOM）；无 BOM 时按 UTF-8 兜底。
+fn decode_task_xml(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let units: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// 生成开机自启的计划任务 XML。
+///
+/// 关键点（都是 schtasks CLI 拼参做不到/会踩坑的）：
+/// - Command 用裸路径（XML 字段精确匹配，无需引号），Arguments 独立字段带
+///   `--hidden`（登录启动静默驻留托盘）
+/// - ExecutionTimeLimit=PT0S：默认 72h 时限会把挂后台的进程杀掉
+/// - 电池两项 false：笔记本电池登录也自启、切电池不中断
+fn autostart_task_xml(exe: &std::path::Path) -> Vec<u8> {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Triggers>
+    <LogonTrigger>
+      <StartBoundary>2025-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{}</Command>
+      <Arguments>{}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        xml_escape(&exe.to_string_lossy()),
+        AUTOSTART_ARG,
+    );
+    // schtasks /xml 要求 UTF-16（带 BOM）
+    let mut bytes: Vec<u8> = Vec::with_capacity(xml.len() * 2 + 2);
+    bytes.extend_from_slice(&0xFEFF_u16.to_le_bytes());
+    for unit in xml.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
 #[tauri::command]
 async fn set_autostart(enable: bool) -> Result<(), String> {
     if enable {
-        // /tr 的值内嵌引号：安装路径（Program Files）带空格时 schtasks 会按
-        // 空格拆分动作，不引会得到残缺的启动命令
+        // 用任务 XML 注册而非 /tr 拼接（见 autostart_task_xml 注释）
         let exe = std::env::current_exe().map_err(es)?;
-        let tr = format!("\"{}\"", exe.display());
+        let xml_path = std::env::temp_dir().join("shu-vpn-autostart.xml");
+        std::fs::write(&xml_path, autostart_task_xml(&exe)).map_err(es)?;
         let out = run_schtasks(&[
             "/create",
             "/tn",
             AUTOSTART_TASK,
-            "/tr",
-            &tr,
-            "/sc",
-            "onlogon",
-            "/rl",
-            "highest",
+            "/xml",
+            &xml_path.to_string_lossy(),
             "/f",
         ])
         .await?;
+        let _ = std::fs::remove_file(&xml_path);
         if !out.status.success() {
             return Err(format!(
                 "注册开机自启失败（schtasks 退出码 {:?}）。开发模式（非管理员）下此功能不可用",
                 out.status.code()
             ));
+        }
+        // 注册后回读校验关键字段（schtasks 对无效 XML 可能静默降级，不校验留坑）
+        let verify = run_schtasks(&["/query", "/tn", AUTOSTART_TASK, "/xml"]).await?;
+        let text = decode_task_xml(&verify.stdout);
+        let exe_str = exe.to_string_lossy().to_string();
+        let sane = text.contains(&exe_str)
+            && text.contains(AUTOSTART_ARG)
+            && text.contains("PT0S")
+            && text.contains("HighestAvailable")
+            && text.contains("DisallowStartIfOnBatteries>false");
+        if !sane {
+            return Err("自启任务注册异常（关键参数缺失），请重试或反馈日志".into());
         }
     } else {
         // 先查询：任务本就不存在时直接视为成功（schtasks 输出是本地化编码，无法按内容判重）
@@ -1117,6 +1206,14 @@ pub fn run() {
                 // 快捷键注册失败不阻断启动（可能与其他软件冲突），仅输出诊断
                 if let Err(e) = apply_hotkey(handle, &settings.hotkey) {
                     eprintln!("[shu-vpn] 全局快捷键注册失败: {e}");
+                }
+            }
+            // 窗口配置 visible:false（消灭启动闪窗），显示时机在此决定：
+            // 自启任务带 --hidden 静默驻留托盘；普通启动照常显示
+            if !std::env::args().any(|a| a == AUTOSTART_ARG) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
                 }
             }
             Ok(())
