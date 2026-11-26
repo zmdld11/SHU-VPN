@@ -847,7 +847,20 @@ fn autostart_task_xml(exe: &std::path::Path) -> Vec<u8> {
 }
 
 #[tauri::command]
-async fn set_autostart(enable: bool) -> Result<(), String> {
+/// 任务 XML 是否需要升级重注册。
+///
+/// 「静默新格式」判据：带 --hidden、无限时（PT0S）、电池豁免、Command 指向
+/// 当前 exe 路径。旧版 schtasks /tr 注册的任务缺前三项（Command 还整串带
+/// 引号），路径不符则说明覆盖安装/换路径后任务已失效——都归为需升级。
+fn task_needs_upgrade(xml: &str, exe: &Path) -> bool {
+    let path_ok = xml.contains(&xml_escape(&exe.to_string_lossy()));
+    !(path_ok
+        && xml.contains(AUTOSTART_ARG)
+        && xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
+        && xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"))
+}
+
+async fn set_autostart_inner(enable: bool) -> Result<(), String> {
     if enable {
         // 用任务 XML 注册而非 /tr 拼接（见 autostart_task_xml 注释）
         let exe = std::env::current_exe().map_err(es)?;
@@ -899,6 +912,60 @@ async fn set_autostart(enable: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn set_autostart(enable: bool) -> Result<(), String> {
+    set_autostart_inner(enable).await
+}
+
+/// 启动自愈：已开启自启但任务仍是旧格式时静默重注册。
+///
+/// v0.5.0 及以前的设置开关只查「任务是否存在」，旧坏任务存在即显示已开启，
+/// 用户不会手动重开 → 新格式永不生效（issue #12 实机确认）。此处启动时
+/// 自动升级，不依赖用户操作。release 构建提权运行具备注册权限；
+/// dev 无权限时仅诊断输出，不影响启动。
+fn spawn_autostart_selfheal(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // 等前端 mounted 完成监听，升级提示才能进日志面板
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let Ok(out) = run_schtasks(&["/query", "/tn", AUTOSTART_TASK, "/xml"]).await else {
+            return;
+        };
+        if !out.status.success() {
+            return; // 未开启自启
+        }
+        let xml = decode_task_xml(&out.stdout);
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        if !task_needs_upgrade(&xml, &exe) {
+            return; // 已是新格式且路径正确
+        }
+        emit(
+            &app,
+            UiEvent::Notice {
+                text: "检测到旧版自启任务，正在升级为静默启动格式…".into(),
+            },
+        );
+        match set_autostart_inner(true).await {
+            Ok(()) => emit(
+                &app,
+                UiEvent::Notice {
+                    text: "✓ 自启任务已升级：下次登录将静默驻留托盘（无窗口、无 UAC）".into(),
+                },
+            ),
+            Err(e) => {
+                eprintln!("[shu-vpn] 自启任务自动升级失败: {e}");
+                emit(
+                    &app,
+                    UiEvent::Notice {
+                        text: format!("自启任务升级失败（可在设置中关闭再开启重试）: {e}"),
+                    },
+                );
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1378,8 @@ pub fn run() {
                     let _ = w.set_focus();
                 }
             }
+            // 旧格式自启任务启动自愈（issue #12）
+            spawn_autostart_selfheal(handle.clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1336,4 +1405,35 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run SHU-VPN");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exe() -> PathBuf {
+        PathBuf::from(r"C:\Program Files\SHU-VPN\shu-vpn.exe")
+    }
+
+    #[test]
+    fn legacy_task_needs_upgrade() {
+        // v0.4.0 及以前 schtasks /tr 注册的真实格式（实测抓取）：无 Arguments、
+        // Command 整串带引号、电池限制为 true、无 ExecutionTimeLimit
+        let legacy = r#"<Task><Settings>
+  <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+  <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries></Settings>
+<Actions><Exec><Command>"C:\Program Files\SHU-VPN\shu-vpn.exe"</Command></Exec></Actions></Task>"#;
+        assert!(task_needs_upgrade(legacy, &exe()));
+    }
+
+    #[test]
+    fn new_task_is_sane() {
+        // 自身生成的 XML 解码后必须被判定为「无需升级」
+        let xml = decode_task_xml(&autostart_task_xml(&exe()));
+        assert!(xml.contains(AUTOSTART_ARG));
+        assert!(!task_needs_upgrade(&xml, &exe()));
+        // 但指向别的安装路径时仍需升级（覆盖安装/换路径场景）
+        let other = PathBuf::from(r"C:\Program Files\Other\shu-vpn.exe");
+        assert!(task_needs_upgrade(&xml, &other));
+    }
 }
